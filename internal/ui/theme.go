@@ -7,9 +7,10 @@ import (
 // Theme contains all color and style definitions
 type Theme struct {
 	// Background colors
-	DeletedBg   lipgloss.Color
-	AddedBg     lipgloss.Color
-	UnchangedBg lipgloss.Color
+	DeletedBg         lipgloss.Color
+	AddedBg           lipgloss.Color
+	UnchangedBg       lipgloss.Color
+	UnchangedBgStripe lipgloss.Color // Alternating row color
 
 	// Foreground colors
 	DeletedFg   lipgloss.Color
@@ -29,38 +30,40 @@ type Theme struct {
 	BorderColor lipgloss.Color
 
 	// Styles
-	DeletedLineStyle   lipgloss.Style
-	AddedLineStyle     lipgloss.Style
-	UnchangedLineStyle lipgloss.Style
-	LineNumStyle       lipgloss.Style
-	FileHeaderStyle    lipgloss.Style
-	SeparatorStyle     lipgloss.Style
+	DeletedLineStyle       lipgloss.Style
+	AddedLineStyle         lipgloss.Style
+	UnchangedLineStyle     lipgloss.Style
+	UnchangedLineStyleAlt  lipgloss.Style // Alternating style
+	LineNumStyle           lipgloss.Style
+	FileHeaderStyle        lipgloss.Style
+	SeparatorStyle         lipgloss.Style
 }
 
 // NewTheme creates a new theme with default colors
 func NewTheme() *Theme {
 	t := &Theme{
-		// Background colors matching the screenshot
-		DeletedBg:   lipgloss.Color("#3d0d0d"), // Dark red
-		AddedBg:     lipgloss.Color("#0d2d0d"), // Dark green
-		UnchangedBg: lipgloss.Color("#1a1a1a"), // Dark gray
+		// Background colors - more subtle and blended with terminal
+		DeletedBg:         lipgloss.Color("#2d1a1a"), // Softer dark red
+		AddedBg:           lipgloss.Color("#1a2d1a"), // Softer dark green
+		UnchangedBg:       lipgloss.Color(""), // Transparent/default terminal bg
+		UnchangedBgStripe: lipgloss.Color("#1c1c1c"), // Subtle stripe for alternating rows
 
-		// Foreground colors
-		DeletedFg:   lipgloss.Color("#ff8888"), // Light red
-		AddedFg:     lipgloss.Color("#88ff88"), // Light green
-		UnchangedFg: lipgloss.Color("#cccccc"), // Light gray
+		// Foreground colors - more muted
+		DeletedFg:   lipgloss.Color("#d78787"), // Muted red
+		AddedFg:     lipgloss.Color("#87d787"), // Muted green
+		UnchangedFg: lipgloss.Color("#b2b2b2"), // Softer gray
 
-		// Line numbers
-		LineNumDeleted:   lipgloss.Color("#ff6666"),
-		LineNumAdded:     lipgloss.Color("#66ff66"),
-		LineNumUnchanged: lipgloss.Color("#666666"),
+		// Line numbers - less prominent
+		LineNumDeleted:   lipgloss.Color("#8b6b6b"),
+		LineNumAdded:     lipgloss.Color("#6b8b6b"),
+		LineNumUnchanged: lipgloss.Color("#5f5f5f"),
 
 		// Headers
-		FileHeaderBg: lipgloss.Color("#2d2d2d"),
-		FileHeaderFg: lipgloss.Color("#ffffff"),
+		FileHeaderBg: lipgloss.Color("#303030"),
+		FileHeaderFg: lipgloss.Color("#e0e0e0"),
 
 		// Borders
-		BorderColor: lipgloss.Color("#444444"),
+		BorderColor: lipgloss.Color("#3a3a3a"),
 	}
 
 	// Create styles
@@ -74,6 +77,10 @@ func NewTheme() *Theme {
 
 	t.UnchangedLineStyle = lipgloss.NewStyle().
 		Background(t.UnchangedBg).
+		Foreground(t.UnchangedFg)
+
+	t.UnchangedLineStyleAlt = lipgloss.NewStyle().
+		Background(t.UnchangedBgStripe).
 		Foreground(t.UnchangedFg)
 
 	t.LineNumStyle = lipgloss.NewStyle().

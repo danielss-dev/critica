@@ -18,6 +18,7 @@ type viewMode int
 const (
 	fileListView viewMode = iota
 	diffView
+	searchMode
 )
 
 type model struct {
@@ -33,6 +34,7 @@ type model struct {
 	width       int
 	height      int
 	renderer    *Renderer
+	scrollOffset int // Current scroll position in diff view
 }
 
 type fileItem struct {
@@ -122,13 +124,19 @@ func RunInteractive(files []parser.FileDiff, useColor, unified bool) error {
 	ti.Placeholder = "Search files..."
 	ti.CharLimit = 50
 
+	// Initialize all files as expanded (not collapsed)
+	collapsed := make(map[int]bool)
+	for i := range files {
+		collapsed[i] = false
+	}
+
 	m := model{
 		files:     files,
 		fileItems: items,
 		list:      l,
 		textInput: ti,
 		viewMode:  fileListView,
-		collapsed: make(map[int]bool),
+		collapsed: collapsed,
 		useColor:  useColor,
 		unified:   unified,
 		renderer:  NewRenderer(useColor, unified),
@@ -158,12 +166,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, keys.Quit):
 				return m, tea.Quit
 
+			case key.Matches(msg, keys.Search):
+				m.viewMode = searchMode
+				m.textInput.Focus()
+				m.textInput.SetValue("")
+				return m, nil
+
 			case key.Matches(msg, keys.Enter):
 				if len(m.list.Items()) > 0 {
-					item := m.list.SelectedItem().(fileItem)
-					m.selectedIdx = item.index
-					m.viewMode = diffView
-					return m, nil
+					selectedItem := m.list.SelectedItem()
+					if selectedItem != nil {
+						if item, ok := selectedItem.(fileItem); ok {
+							m.selectedIdx = item.index
+							m.scrollOffset = 0 // Reset scroll when entering diff view
+							m.viewMode = diffView
+							return m, nil
+						}
+					}
 				}
 
 			case key.Matches(msg, keys.ToggleView):
@@ -177,33 +196,119 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 
+		case searchMode:
+			switch msg.String() {
+			case "enter":
+				// If there's a selected file, go to diff view
+				if len(m.list.Items()) > 0 {
+					selectedItem := m.list.SelectedItem()
+					if selectedItem != nil {
+						if item, ok := selectedItem.(fileItem); ok {
+							m.selectedIdx = item.index
+							m.scrollOffset = 0 // Reset scroll when entering diff view
+							m.viewMode = diffView
+							m.textInput.Blur()
+							return m, nil
+						}
+					}
+				}
+				// Otherwise, return to file list view
+				m.filterList()
+				m.viewMode = fileListView
+				m.textInput.Blur()
+				return m, nil
+
+			case "esc":
+				// Cancel search and return to file list view
+				m.viewMode = fileListView
+				m.textInput.Blur()
+				m.textInput.SetValue("")
+				m.resetList()
+				return m, nil
+
+			case "up", "down":
+				// Allow navigating filtered list
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+
+			default:
+				var cmd tea.Cmd
+				m.textInput, cmd = m.textInput.Update(msg)
+				m.filterList()
+				return m, cmd
+			}
+
 		case diffView:
-			switch {
-			case key.Matches(msg, keys.Quit):
+			switch msg.String() {
+			case "q", "ctrl+c":
 				return m, tea.Quit
 
-			case key.Matches(msg, keys.Back):
+			case "esc", "backspace":
 				m.viewMode = fileListView
 				return m, nil
 
-			case key.Matches(msg, keys.ToggleView):
+			case "/":
+				m.viewMode = searchMode
+				m.textInput.Focus()
+				m.textInput.SetValue("")
+				return m, nil
+
+			case "tab":
 				m.unified = !m.unified
 				m.renderer.unified = m.unified
 				return m, nil
 
-			case key.Matches(msg, keys.Collapse):
+			case " ":
 				m.collapsed[m.selectedIdx] = !m.collapsed[m.selectedIdx]
 				return m, nil
 
-			case key.Matches(msg, keys.Up):
-				if m.selectedIdx > 0 {
-					m.selectedIdx--
+			// Vim motions for scrolling within file
+			case "j", "down":
+				m.scrollOffset++
+				return m, nil
+
+			case "k", "up":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
 				}
 				return m, nil
 
-			case key.Matches(msg, keys.Down):
+			case "d", "ctrl+d":
+				// Page down
+				m.scrollOffset += m.height / 2
+				return m, nil
+
+			case "u", "ctrl+u":
+				// Page up
+				m.scrollOffset -= m.height / 2
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, nil
+
+			case "g":
+				// Go to top
+				m.scrollOffset = 0
+				return m, nil
+
+			case "G":
+				// Go to bottom (will be clamped in render)
+				m.scrollOffset = 999999
+				return m, nil
+
+			// Vim motions for file navigation
+			case "h", "left":
+				if m.selectedIdx > 0 {
+					m.selectedIdx--
+					m.scrollOffset = 0 // Reset scroll when changing files
+				}
+				return m, nil
+
+			case "l", "right":
 				if m.selectedIdx < len(m.files)-1 {
 					m.selectedIdx++
+					m.scrollOffset = 0 // Reset scroll when changing files
 				}
 				return m, nil
 			}
@@ -219,9 +324,35 @@ func (m model) View() string {
 		return m.renderFileList()
 	case diffView:
 		return m.renderDiff()
+	case searchMode:
+		return m.renderSearch()
 	default:
 		return ""
 	}
+}
+
+// filterList filters the file list based on the search input
+func (m *model) filterList() {
+	query := strings.ToLower(m.textInput.Value())
+	if query == "" {
+		m.resetList()
+		return
+	}
+
+	var filteredItems []list.Item
+	for _, item := range m.fileItems {
+		fileItem := item.(fileItem)
+		if strings.Contains(strings.ToLower(fileItem.name), query) {
+			filteredItems = append(filteredItems, item)
+		}
+	}
+
+	m.list.SetItems(filteredItems)
+}
+
+// resetList resets the file list to show all files
+func (m *model) resetList() {
+	m.list.SetItems(m.fileItems)
 }
 
 func (m model) renderFileList() string {
@@ -236,7 +367,33 @@ func (m model) renderFileList() string {
 		viewMode = "unified"
 	}
 
-	help := fmt.Sprintf("Current view: %s | Press 'tab' to toggle | Press 'enter' to view diff | Press 'q' to quit", viewMode)
+	help := fmt.Sprintf("Current view: %s | Press 'tab' to toggle | Press '/' to search | Press 'enter' to view diff | Press 'q' to quit", viewMode)
+	b.WriteString(helpStyle.Render(help))
+
+	return b.String()
+}
+
+func (m model) renderSearch() string {
+	var b strings.Builder
+
+	// Show search input at the top
+	searchStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("205")).
+		Padding(0, 1)
+
+	b.WriteString(searchStyle.Render("Search Files"))
+	b.WriteString("\n\n")
+	b.WriteString(m.textInput.View())
+	b.WriteString("\n\n")
+
+	// Show filtered list
+	b.WriteString(m.list.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	help := "Type to filter | Enter: confirm | Esc: cancel"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -270,7 +427,7 @@ func (m model) renderDiff() string {
 	// Check if collapsed
 	if m.collapsed[m.selectedIdx] {
 		collapsedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		b.WriteString(collapsedStyle.Render(fmt.Sprintf("File collapsed. Press 'space' to expand.")))
+		b.WriteString(collapsedStyle.Render("File collapsed. Press 'space' to expand."))
 	} else {
 		// Render file diff
 		var diffOutput strings.Builder
@@ -281,10 +438,16 @@ func (m model) renderDiff() string {
 
 		// Render hunks
 		lexer := m.renderer.getLexer(file.Extension)
+		unchangedLineCounter := 0
 		for _, hunk := range file.Hunks {
 			if m.unified {
 				for _, line := range hunk.Lines {
-					diffOutput.WriteString(m.renderLineDirect(line, lexer))
+					useAltStyle := false
+					if line.Type == parser.LineUnchanged {
+						useAltStyle = unchangedLineCounter%2 == 1
+						unchangedLineCounter++
+					}
+					diffOutput.WriteString(m.renderLineDirect(line, lexer, useAltStyle))
 					diffOutput.WriteString("\n")
 				}
 			} else {
@@ -292,20 +455,61 @@ func (m model) renderDiff() string {
 			}
 		}
 
-		b.WriteString(diffOutput.String())
+		// Apply viewport scrolling
+		allLines := strings.Split(diffOutput.String(), "\n")
+		totalLines := len(allLines)
+
+		// Calculate viewport height (height - title - help - padding)
+		viewportHeight := m.height - 6
+		if viewportHeight < 1 {
+			viewportHeight = 10
+		}
+
+		// Clamp scroll offset
+		maxScroll := totalLines - viewportHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		scrollOffset := m.scrollOffset
+		if scrollOffset > maxScroll {
+			scrollOffset = maxScroll
+		}
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+
+		// Get visible lines
+		endLine := scrollOffset + viewportHeight
+		if endLine > totalLines {
+			endLine = totalLines
+		}
+
+		visibleLines := allLines[scrollOffset:endLine]
+		b.WriteString(strings.Join(visibleLines, "\n"))
+
+		// Show scroll indicator if needed
+		if totalLines > viewportHeight {
+			b.WriteString("\n")
+			scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+			percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+			if scrollOffset >= maxScroll {
+				percentage = 100
+			}
+			b.WriteString(scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines)))
+		}
 	}
 
 	b.WriteString("\n\n")
 
 	// Help bar
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "↑/↓: navigate files | space: collapse/expand | tab: toggle view | esc: back | q: quit"
+	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | /: search | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
 }
 
-func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer) string {
+func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyle bool) string {
 	var lineNum int
 	var prefix string
 
@@ -328,7 +532,11 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer) string {
 		lineNumStr = "    "
 	}
 
+	// Apply syntax highlighting to content
 	content := line.Content
+	if m.useColor && lexer != nil {
+		content = m.renderer.highlightCode(content, lexer)
+	}
 
 	var lineStyle lipgloss.Style
 	if m.useColor {
@@ -338,7 +546,11 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer) string {
 		case parser.LineAdded:
 			lineStyle = m.renderer.theme.AddedLineStyle
 		case parser.LineUnchanged:
-			lineStyle = m.renderer.theme.UnchangedLineStyle
+			if useAltStyle {
+				lineStyle = m.renderer.theme.UnchangedLineStyleAlt
+			} else {
+				lineStyle = m.renderer.theme.UnchangedLineStyle
+			}
 		}
 	} else {
 		lineStyle = lipgloss.NewStyle()
@@ -360,20 +572,25 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 		columnWidth = 40
 	}
 
+	unchangedLineCounter := 0
+
 	for _, line := range hunk.Lines {
 		leftLine := ""
 		rightLine := ""
+		useAltStyle := false
 
 		switch line.Type {
 		case parser.LineDeleted:
-			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true)
-			rightLine = m.renderer.formatEmptyLine(columnWidth)
+			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, false)
+			rightLine = m.renderer.formatEmptyLine(columnWidth, false)
 		case parser.LineAdded:
-			leftLine = m.renderer.formatEmptyLine(columnWidth)
-			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false)
+			leftLine = m.renderer.formatEmptyLine(columnWidth, false)
+			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, false)
 		case parser.LineUnchanged:
-			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true)
-			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false)
+			useAltStyle = unchangedLineCounter%2 == 1
+			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, useAltStyle)
+			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, useAltStyle)
+			unchangedLineCounter++
 		}
 
 		separator := m.renderer.theme.SeparatorStyle.Render("│")

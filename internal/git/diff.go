@@ -151,9 +151,10 @@ func getUntrackedFilesDiff(workDir, filterPath string) (string, error) {
 		}
 
 		// If a filter path is specified, check if this file matches
-		if filterPath != "." {
-			relPath, _ := filepath.Rel(workDir, filterPath)
-			if !strings.HasPrefix(file, relPath) {
+		relPath, _ := filepath.Rel(workDir, filterPath)
+		if relPath != "." && relPath != "" {
+			// Filter path is a subdirectory or file
+			if !strings.HasPrefix(file, relPath+string(filepath.Separator)) && file != relPath {
 				continue
 			}
 		}

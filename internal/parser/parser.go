@@ -69,6 +69,12 @@ func ParseDiff(diffOutput string) ([]FileDiff, error) {
 
 		// Check for diff header (start of new file)
 		if matches := diffHeaderRegex.FindStringSubmatch(line); matches != nil {
+			// Save previous hunk to previous file if exists
+			if currentHunk != nil && currentFile != nil {
+				currentFile.Hunks = append(currentFile.Hunks, *currentHunk)
+				currentHunk = nil
+			}
+
 			// Save previous file if exists
 			if currentFile != nil {
 				files = append(files, *currentFile)
@@ -80,7 +86,6 @@ func ParseDiff(diffOutput string) ([]FileDiff, error) {
 				NewPath: matches[2],
 			}
 			currentFile.Extension = filepath.Ext(currentFile.NewPath)
-			currentHunk = nil
 			continue
 		}
 

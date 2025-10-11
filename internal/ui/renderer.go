@@ -107,26 +107,30 @@ func (r *Renderer) renderHunk(hunk parser.Hunk, lexer chroma.Lexer) {
 	// Build left (old) and right (new) columns
 	leftLines := []string{}
 	rightLines := []string{}
+	unchangedLineCounter := 0
 
 	for _, line := range hunk.Lines {
 		leftLine := ""
 		rightLine := ""
+		useAltStyle := false
 
 		switch line.Type {
 		case parser.LineDeleted:
 			// Show on left only
-			leftLine = r.formatLine(line, columnWidth, lexer, true)
-			rightLine = r.formatEmptyLine(columnWidth)
+			leftLine = r.formatLine(line, columnWidth, lexer, true, false)
+			rightLine = r.formatEmptyLine(columnWidth, false)
 
 		case parser.LineAdded:
 			// Show on right only
-			leftLine = r.formatEmptyLine(columnWidth)
-			rightLine = r.formatLine(line, columnWidth, lexer, false)
+			leftLine = r.formatEmptyLine(columnWidth, false)
+			rightLine = r.formatLine(line, columnWidth, lexer, false, false)
 
 		case parser.LineUnchanged:
-			// Show on both sides
-			leftLine = r.formatLine(line, columnWidth, lexer, true)
-			rightLine = r.formatLine(line, columnWidth, lexer, false)
+			// Show on both sides with alternating style
+			useAltStyle = unchangedLineCounter%2 == 1
+			leftLine = r.formatLine(line, columnWidth, lexer, true, useAltStyle)
+			rightLine = r.formatLine(line, columnWidth, lexer, false, useAltStyle)
+			unchangedLineCounter++
 		}
 
 		leftLines = append(leftLines, leftLine)
@@ -142,6 +146,8 @@ func (r *Renderer) renderHunk(hunk parser.Hunk, lexer chroma.Lexer) {
 
 // renderHunkUnified renders a single hunk in unified diff format
 func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
+	unchangedLineCounter := 0
+
 	for _, line := range hunk.Lines {
 		// Determine line number and prefix
 		var lineNum int
@@ -191,7 +197,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 			content = r.highlightCode(content, lexer)
 		}
 
-		// Apply line style based on type
+		// Apply line style based on type with alternating rows
 		var lineStyle lipgloss.Style
 		if r.useColor {
 			switch line.Type {
@@ -200,7 +206,13 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 			case parser.LineAdded:
 				lineStyle = r.theme.AddedLineStyle
 			case parser.LineUnchanged:
-				lineStyle = r.theme.UnchangedLineStyle
+				// Alternate between two styles for unchanged lines
+				if unchangedLineCounter%2 == 0 {
+					lineStyle = r.theme.UnchangedLineStyle
+				} else {
+					lineStyle = r.theme.UnchangedLineStyleAlt
+				}
+				unchangedLineCounter++
 			}
 		} else {
 			lineStyle = lipgloss.NewStyle()
@@ -218,7 +230,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 }
 
 // formatLine formats a single line with line number and content
-func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, isLeft bool) string {
+func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, isLeft bool, useAltStyle bool) string {
 	// Get line number
 	lineNum := line.OldLineNum
 	if !isLeft {
@@ -260,7 +272,7 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	contentWidth := width - 5 // 4 for line number, 1 for space
 	content = r.fitContent(content, contentWidth)
 
-	// Apply line style based on type
+	// Apply line style based on type with alternating support
 	var lineStyle lipgloss.Style
 	if r.useColor {
 		switch line.Type {
@@ -269,7 +281,11 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 		case parser.LineAdded:
 			lineStyle = r.theme.AddedLineStyle
 		case parser.LineUnchanged:
-			lineStyle = r.theme.UnchangedLineStyle
+			if useAltStyle {
+				lineStyle = r.theme.UnchangedLineStyleAlt
+			} else {
+				lineStyle = r.theme.UnchangedLineStyle
+			}
 		}
 	} else {
 		lineStyle = lipgloss.NewStyle()
@@ -285,9 +301,12 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 }
 
 // formatEmptyLine creates an empty line for the split screen
-func (r *Renderer) formatEmptyLine(width int) string {
+func (r *Renderer) formatEmptyLine(width int, useAltStyle bool) string {
 	emptyLine := strings.Repeat(" ", width)
 	if r.useColor {
+		if useAltStyle {
+			return r.theme.UnchangedLineStyleAlt.Render(emptyLine)
+		}
 		return r.theme.UnchangedLineStyle.Render(emptyLine)
 	}
 	return emptyLine
