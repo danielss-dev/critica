@@ -295,6 +295,10 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	fullLine := lineNumStr + " " + content
 
 	if r.useColor {
+		// For unchanged lines, don't apply width to avoid forced background
+		if line.Type == parser.LineUnchanged {
+			return lineStyle.Render(r.padRight(fullLine, width))
+		}
 		return lineStyle.Width(width).Render(fullLine)
 	}
 	return r.padRight(fullLine, width)
@@ -303,12 +307,7 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 // formatEmptyLine creates an empty line for the split screen
 func (r *Renderer) formatEmptyLine(width int, useAltStyle bool) string {
 	emptyLine := strings.Repeat(" ", width)
-	if r.useColor {
-		if useAltStyle {
-			return r.theme.UnchangedLineStyleAlt.Render(emptyLine)
-		}
-		return r.theme.UnchangedLineStyle.Render(emptyLine)
-	}
+	// No background for empty lines to blend with terminal
 	return emptyLine
 }
 

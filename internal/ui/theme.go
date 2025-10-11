@@ -75,12 +75,11 @@ func NewTheme() *Theme {
 		Background(t.AddedBg).
 		Foreground(t.AddedFg)
 
+	// Unchanged lines have no background to blend with terminal
 	t.UnchangedLineStyle = lipgloss.NewStyle().
-		Background(t.UnchangedBg).
 		Foreground(t.UnchangedFg)
 
 	t.UnchangedLineStyleAlt = lipgloss.NewStyle().
-		Background(t.UnchangedBgStripe).
 		Foreground(t.UnchangedFg)
 
 	t.LineNumStyle = lipgloss.NewStyle().
