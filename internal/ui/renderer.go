@@ -64,7 +64,14 @@ func (r *Renderer) renderFile(file parser.FileDiff) {
 	lexer := r.getLexer(file.Extension)
 
 	// Render each hunk
-	for _, hunk := range file.Hunks {
+	for hunkIdx, hunk := range file.Hunks {
+		// Add separator between hunks to show line jumps
+		if hunkIdx > 0 {
+			separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+			separator := separatorStyle.Render("⋯")
+			fmt.Println(separator)
+		}
+
 		if r.unified {
 			r.renderHunkUnified(hunk, lexer)
 		} else {

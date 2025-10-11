@@ -42,28 +42,28 @@ type Theme struct {
 // NewTheme creates a new theme with default colors
 func NewTheme() *Theme {
 	t := &Theme{
-		// Background colors - more subtle and blended with terminal
-		DeletedBg:         lipgloss.Color("#2d1a1a"), // Softer dark red
-		AddedBg:           lipgloss.Color("#1a2d1a"), // Softer dark green
+		// Background colors - very subtle, professional
+		DeletedBg:         lipgloss.Color("#3a2020"), // Very subtle dark red
+		AddedBg:           lipgloss.Color("#203a20"), // Very subtle dark green
 		UnchangedBg:       lipgloss.Color(""), // Transparent/default terminal bg
-		UnchangedBgStripe: lipgloss.Color("#1c1c1c"), // Subtle stripe for alternating rows
+		UnchangedBgStripe: lipgloss.Color("#1a1a1a"), // Subtle stripe for alternating rows
 
-		// Foreground colors - more muted
-		DeletedFg:   lipgloss.Color("#d78787"), // Muted red
-		AddedFg:     lipgloss.Color("#87d787"), // Muted green
-		UnchangedFg: lipgloss.Color("#b2b2b2"), // Softer gray
+		// Foreground colors - desaturated, professional
+		DeletedFg:   lipgloss.Color("#c86b6b"), // Desaturated red
+		AddedFg:     lipgloss.Color("#6bc86b"), // Desaturated green
+		UnchangedFg: lipgloss.Color("#a0a0a0"), // Neutral gray
 
-		// Line numbers - less prominent
-		LineNumDeleted:   lipgloss.Color("#8b6b6b"),
-		LineNumAdded:     lipgloss.Color("#6b8b6b"),
-		LineNumUnchanged: lipgloss.Color("#5f5f5f"),
+		// Line numbers - very subtle
+		LineNumDeleted:   lipgloss.Color("#7a5f5f"),
+		LineNumAdded:     lipgloss.Color("#5f7a5f"),
+		LineNumUnchanged: lipgloss.Color("#4a4a4a"),
 
 		// Headers
-		FileHeaderBg: lipgloss.Color("#303030"),
-		FileHeaderFg: lipgloss.Color("#e0e0e0"),
+		FileHeaderBg: lipgloss.Color("#2a2a2a"),
+		FileHeaderFg: lipgloss.Color("#d0d0d0"),
 
 		// Borders
-		BorderColor: lipgloss.Color("#3a3a3a"),
+		BorderColor: lipgloss.Color("#333333"),
 	}
 
 	// Create styles
