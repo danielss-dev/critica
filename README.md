@@ -1,0 +1,1 @@
+# Go CLI Tool: "critica" - Pretty Git Diff Viewer
