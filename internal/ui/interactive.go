@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,19 +21,19 @@ const (
 )
 
 type model struct {
-	files          []parser.FileDiff
-	fileItems      []list.Item
-	list           list.Model
-	textInput      textinput.Model
-	viewMode       viewMode
-	selectedIdx    int
-	collapsed      map[int]bool
-	useColor       bool
-	unified        bool
-	width          int
-	height         int
-	renderer       *Renderer
-	scrollOffset   int  // Current scroll position in diff view
+	files            []parser.FileDiff
+	fileItems        []list.Item
+	list             list.Model
+	textInput        textinput.Model
+	viewMode         viewMode
+	selectedIdx      int
+	collapsed        map[int]bool
+	useColor         bool
+	unified          bool
+	width            int
+	height           int
+	renderer         *Renderer
+	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
 }
 
@@ -86,52 +85,6 @@ func newCustomDelegate() customDelegate {
 		Padding(0, 0, 0, 2)
 
 	return d
-}
-
-type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Enter      key.Binding
-	Back       key.Binding
-	Quit       key.Binding
-	Search     key.Binding
-	ToggleView key.Binding
-	Collapse   key.Binding
-}
-
-var keys = keyMap{
-	Up: key.NewBinding(
-		key.WithKeys("up", "k"),
-		key.WithHelp("↑/k", "move up"),
-	),
-	Down: key.NewBinding(
-		key.WithKeys("down", "j"),
-		key.WithHelp("↓/j", "move down"),
-	),
-	Enter: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("enter", "select file"),
-	),
-	Back: key.NewBinding(
-		key.WithKeys("esc", "backspace"),
-		key.WithHelp("esc", "back to file list"),
-	),
-	Quit: key.NewBinding(
-		key.WithKeys("q", "ctrl+c"),
-		key.WithHelp("q", "quit"),
-	),
-	Search: key.NewBinding(
-		key.WithKeys("/"),
-		key.WithHelp("/", "search files"),
-	),
-	ToggleView: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "toggle split/unified"),
-	),
-	Collapse: key.NewBinding(
-		key.WithKeys("space"),
-		key.WithHelp("space", "collapse/expand file"),
-	),
 }
 
 func RunInteractive(files []parser.FileDiff, useColor, unified bool) error {
@@ -539,8 +492,20 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 	for hunkIdx, hunk := range file.Hunks {
 		// Add separator between hunks to show line jumps
 		if hunkIdx > 0 {
+			prevHunk := file.Hunks[hunkIdx-1]
+			// Calculate the line skip
+			prevEnd := prevHunk.OldStart + prevHunk.OldLines - 1
+			currentStart := hunk.OldStart
+			linesSkipped := currentStart - prevEnd - 1
+
 			separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-			lines = append(lines, separatorStyle.Render("⋯"))
+			var separatorText string
+			if linesSkipped > 0 {
+				separatorText = fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped)
+			} else {
+				separatorText = "⋯"
+			}
+			lines = append(lines, separatorStyle.Render(separatorText))
 			lineCount++
 		}
 
@@ -698,7 +663,26 @@ func (m model) renderDiff() string {
 		// Render hunks
 		lexer := m.renderer.getLexer(file.Extension)
 		unchangedLineCounter := 0
-		for _, hunk := range file.Hunks {
+		for hunkIdx, hunk := range file.Hunks {
+			// Add separator between hunks to show line jumps
+			if hunkIdx > 0 {
+				prevHunk := file.Hunks[hunkIdx-1]
+				// Calculate the line skip
+				prevEnd := prevHunk.OldStart + prevHunk.OldLines - 1
+				currentStart := hunk.OldStart
+				linesSkipped := currentStart - prevEnd - 1
+
+				separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+				var separatorText string
+				if linesSkipped > 0 {
+					separatorText = fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped)
+				} else {
+					separatorText = "⋯"
+				}
+				diffOutput.WriteString(separatorStyle.Render(separatorText))
+				diffOutput.WriteString("\n")
+			}
+
 			if m.unified {
 				for _, line := range hunk.Lines {
 					useAltStyle := false
@@ -757,6 +741,7 @@ func (m model) renderDiff() string {
 			b.WriteString(scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines)))
 		}
 	}
+	// test
 
 	b.WriteString("\n\n")
 

@@ -67,8 +67,22 @@ func (r *Renderer) renderFile(file parser.FileDiff) {
 	for hunkIdx, hunk := range file.Hunks {
 		// Add separator between hunks to show line jumps
 		if hunkIdx > 0 {
+			prevHunk := file.Hunks[hunkIdx-1]
+
+			// Calculate the line skip
+			// Previous hunk ends at: OldStart + OldLines - 1
+			prevEnd := prevHunk.OldStart + prevHunk.OldLines - 1
+			// Current hunk starts at: OldStart
+			currentStart := hunk.OldStart
+			linesSkipped := currentStart - prevEnd - 1
+
 			separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-			separator := separatorStyle.Render("⋯")
+			var separator string
+			if linesSkipped > 0 {
+				separator = separatorStyle.Render(fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped))
+			} else {
+				separator = separatorStyle.Render("⋯")
+			}
 			fmt.Println(separator)
 		}
 
@@ -324,8 +338,24 @@ func (r *Renderer) fitContent(content string, width int) string {
 	plainContent := stripAnsi(content)
 
 	if len(plainContent) > width {
-		// Truncate
-		return content[:width]
+		// Truncate: need to find the position in the styled string
+		// that corresponds to 'width' visible characters
+		visibleCount := 0
+		inEscape := false
+		truncateAt := 0
+
+		for i := 0; i < len(content) && visibleCount < width; i++ {
+			if content[i] == '\x1b' {
+				inEscape = true
+			} else if inEscape && content[i] == 'm' {
+				inEscape = false
+			} else if !inEscape {
+				visibleCount++
+			}
+			truncateAt = i + 1
+		}
+
+		return content[:truncateAt]
 	}
 
 	// Pad with spaces
