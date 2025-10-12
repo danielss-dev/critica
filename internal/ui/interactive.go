@@ -25,7 +25,18 @@ const (
 	searchMode
 )
 
+type fileFilter int
+
+const (
+	filterAll fileFilter = iota
+	filterStaged
+	filterUnstaged
+)
+
 type model struct {
+	allFiles         []parser.FileDiff
+	stagedFiles      []parser.FileDiff
+	unstagedFiles    []parser.FileDiff
 	files            []parser.FileDiff
 	fileItems        []list.Item
 	list             list.Model
@@ -33,6 +44,7 @@ type model struct {
 	viewMode         viewMode
 	selectedIdx      int
 	collapsed        map[int]bool
+	filterMode       fileFilter
 	useColor         bool
 	unified          bool
 	width            int
@@ -52,6 +64,57 @@ type fileItem struct {
 func (f fileItem) FilterValue() string { return f.fullPath }
 func (f fileItem) Title() string       { return f.displayName }
 func (f fileItem) Description() string { return f.status }
+
+func filterDisplayName(filter fileFilter) string {
+	switch filter {
+	case filterStaged:
+		return "Staged"
+	case filterUnstaged:
+		return "Unstaged"
+	default:
+		return "All"
+	}
+}
+
+func buildFileItems(files []parser.FileDiff) []list.Item {
+	items := make([]list.Item, len(files))
+	for i, file := range files {
+		status := "modified"
+		if file.IsNew {
+			status = "new file"
+		} else if file.IsDeleted {
+			status = "deleted"
+		} else if file.IsRenamed {
+			status = "renamed"
+		}
+
+		displayName := shortenPath(file.NewPath, maxFileListPathLength)
+		items[i] = fileItem{
+			fullPath:    file.NewPath,
+			displayName: displayName,
+			status:      status,
+			index:       i,
+		}
+	}
+	return items
+}
+
+func newCollapsedMap(length int) map[int]bool {
+	collapsed := make(map[int]bool, length)
+	for i := 0; i < length; i++ {
+		collapsed[i] = false
+	}
+	return collapsed
+}
+
+func findFileIndexByPath(files []parser.FileDiff, path string) int {
+	for i, file := range files {
+		if file.NewPath == path {
+			return i
+		}
+	}
+	return -1
+}
 
 // Custom delegate with muted colors
 type customDelegate struct {
@@ -93,30 +156,9 @@ func newCustomDelegate() customDelegate {
 	return d
 }
 
-func RunInteractive(files []parser.FileDiff, useColor, unified bool) error {
-	// Create file items for list
-	items := make([]list.Item, len(files))
-	for i, file := range files {
-		status := "modified"
-		if file.IsNew {
-			status = "new file"
-		} else if file.IsDeleted {
-			status = "deleted"
-		} else if file.IsRenamed {
-			status = "renamed"
-		}
-		displayName := shortenPath(file.NewPath, maxFileListPathLength)
-		items[i] = fileItem{
-			fullPath:    file.NewPath,
-			displayName: displayName,
-			status:      status,
-			index:       i,
-		}
-	}
-
-	// Create list with custom delegate
+func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, useColor, unified bool) error {
 	delegate := newCustomDelegate()
-	l := list.New(items, delegate, 0, 0)
+	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Changed Files"
 
 	// Customize list title style (professional but vibrant)
@@ -136,28 +178,87 @@ func RunInteractive(files []parser.FileDiff, useColor, unified bool) error {
 	ti.Placeholder = "Search files..."
 	ti.CharLimit = 50
 
-	// Initialize all files as expanded (not collapsed)
-	collapsed := make(map[int]bool)
-	for i := range files {
-		collapsed[i] = false
-	}
-
 	m := model{
-		files:            files,
-		fileItems:        items,
+		allFiles:         allFiles,
+		stagedFiles:      stagedFiles,
+		unstagedFiles:    unstagedFiles,
 		list:             l,
 		textInput:        ti,
 		viewMode:         fileListView,
-		collapsed:        collapsed,
+		selectedIdx:      -1,
+		filterMode:       filterAll,
 		useColor:         useColor,
 		unified:          unified,
 		renderer:         NewRenderer(useColor, unified),
-		previewCollapsed: false, // Show preview by default
+		previewCollapsed: false,
 	}
+
+	m.applyFilter(filterAll)
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+func (m *model) updateListTitle() {
+	label := filterDisplayName(m.filterMode)
+	m.list.Title = fmt.Sprintf("Changed Files (%s)", label)
+}
+
+func (m *model) applyFilter(filter fileFilter) {
+	prevPath := ""
+	if len(m.files) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.files) {
+		prevPath = m.files[m.selectedIdx].NewPath
+	}
+
+	var target []parser.FileDiff
+	switch filter {
+	case filterStaged:
+		target = m.stagedFiles
+	case filterUnstaged:
+		target = m.unstagedFiles
+	default:
+		target = m.allFiles
+	}
+
+	m.filterMode = filter
+	m.files = target
+	m.fileItems = buildFileItems(target)
+	m.collapsed = newCollapsedMap(len(target))
+	m.scrollOffset = 0
+
+	m.list.SetItems(m.fileItems)
+
+	if len(target) == 0 {
+		m.selectedIdx = -1
+		m.list.ResetSelected()
+		m.updateListTitle()
+		return
+	}
+
+	idx := -1
+	if prevPath != "" {
+		idx = findFileIndexByPath(target, prevPath)
+	}
+	if idx < 0 {
+		idx = 0
+	}
+
+	m.selectedIdx = idx
+	m.list.Select(idx)
+	m.updateListTitle()
+}
+
+func (m *model) setFilter(filter fileFilter) {
+	if m.filterMode == filter {
+		return
+	}
+	m.applyFilter(filter)
+}
+
+func (m *model) cycleFilter() {
+	next := fileFilter((int(m.filterMode) + 1) % 3)
+	m.applyFilter(next)
 }
 
 func (m model) Init() tea.Cmd {
@@ -188,6 +289,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case " ":
 				// Toggle preview collapse
 				m.previewCollapsed = !m.previewCollapsed
+				return m, nil
+
+			case "f":
+				m.cycleFilter()
+				return m, nil
+
+			case "a":
+				m.setFilter(filterAll)
+				return m, nil
+
+			case "s":
+				m.setFilter(filterStaged)
+				return m, nil
+
+			case "c":
+				m.setFilter(filterUnstaged)
 				return m, nil
 
 			case "o", "enter":
@@ -272,6 +389,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewMode = searchMode
 				m.textInput.Focus()
 				m.textInput.SetValue("")
+				return m, nil
+
+			case "f":
+				m.cycleFilter()
+				m.viewMode = fileListView
+				return m, nil
+
+			case "a":
+				m.setFilter(filterAll)
+				m.viewMode = fileListView
+				return m, nil
+
+			case "s":
+				m.setFilter(filterStaged)
+				m.viewMode = fileListView
+				return m, nil
+
+			case "c":
+				m.setFilter(filterUnstaged)
+				m.viewMode = fileListView
 				return m, nil
 
 			case "tab":
@@ -383,7 +520,7 @@ func (m model) renderFileList() string {
 		b.WriteString("\n\n")
 
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | q: quit"
+		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
 		b.WriteString(helpStyle.Render(help))
 		return b.String()
 	}
@@ -459,7 +596,7 @@ func (m model) renderFileList() string {
 	// Help text
 	b.WriteString("\n")
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | q: quit"
+	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -923,7 +1060,7 @@ func (m model) renderDiff() string {
 
 	// Help bar
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | /: search | esc: back | q: quit"
+	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()

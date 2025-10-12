@@ -67,8 +67,14 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not a git repository: %s", path)
 	}
 
+	// Select diff mode
+	diffMode := git.DiffModeAll
+	if showStaged {
+		diffMode = git.DiffModeStaged
+	}
+
 	// Get the git diff
-	diffOutput, err := git.GetDiff(path, showStaged)
+	diffOutput, err := git.GetDiffForMode(path, diffMode)
 	if err != nil {
 		return fmt.Errorf("failed to get git diff: %w", err)
 	}
@@ -87,7 +93,32 @@ func runDiff(cmd *cobra.Command, args []string) error {
 
 	// Run in interactive mode or static mode
 	if interactive {
-		return ui.RunInteractive(files, !noColor, unified)
+		var stagedFiles []parser.FileDiff
+		var unstagedFiles []parser.FileDiff
+
+		if showStaged {
+			stagedFiles = files
+		} else {
+			stagedOutput, err := git.GetDiffForMode(path, git.DiffModeStaged)
+			if err != nil {
+				return fmt.Errorf("failed to get staged diff: %w", err)
+			}
+			stagedFiles, err = parser.ParseDiff(stagedOutput)
+			if err != nil {
+				return fmt.Errorf("failed to parse staged diff: %w", err)
+			}
+
+			unstagedOutput, err := git.GetDiffForMode(path, git.DiffModeUnstaged)
+			if err != nil {
+				return fmt.Errorf("failed to get unstaged diff: %w", err)
+			}
+			unstagedFiles, err = parser.ParseDiff(unstagedOutput)
+			if err != nil {
+				return fmt.Errorf("failed to parse unstaged diff: %w", err)
+			}
+		}
+
+		return ui.RunInteractive(files, stagedFiles, unstagedFiles, !noColor, unified)
 	}
 
 	// Render the diff statically

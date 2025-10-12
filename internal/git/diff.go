@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+type DiffMode int
+
+const (
+	DiffModeAll DiffMode = iota
+	DiffModeStaged
+	DiffModeUnstaged
+)
+
 // IsGitRepository checks if the given path is within a git repository
 func IsGitRepository(path string) bool {
 	// Get absolute path
@@ -38,13 +46,23 @@ func IsGitRepository(path string) bool {
 
 // GetDiff retrieves the git diff for the specified path
 func GetDiff(path string, staged bool) (string, error) {
-	// Get absolute path
+	if staged {
+		return getDiffInternal(path, DiffModeStaged)
+	}
+	return getDiffInternal(path, DiffModeAll)
+}
+
+// GetDiffForMode retrieves the git diff for a specific diff mode
+func GetDiffForMode(path string, mode DiffMode) (string, error) {
+	return getDiffInternal(path, mode)
+}
+
+func getDiffInternal(path string, mode DiffMode) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	// Set working directory
 	workDir := absPath
 	stat, err := os.Stat(absPath)
 	if err == nil && !stat.IsDir() {
@@ -53,15 +71,13 @@ func GetDiff(path string, staged bool) (string, error) {
 
 	var allDiffs strings.Builder
 
-	// Get regular diff
-	regularDiff, err := getRegularDiff(absPath, workDir, staged)
+	regularDiff, err := runGitDiff(absPath, workDir, mode)
 	if err != nil {
 		return "", err
 	}
 	allDiffs.WriteString(regularDiff)
 
-	// If not showing only staged changes, also get new/untracked files
-	if !staged {
+	if shouldIncludeUntracked(mode) {
 		untrackedDiff, err := getUntrackedFilesDiff(workDir, absPath)
 		if err == nil && untrackedDiff != "" {
 			if allDiffs.Len() > 0 {
@@ -74,48 +90,41 @@ func GetDiff(path string, staged bool) (string, error) {
 	return allDiffs.String(), nil
 }
 
-func getRegularDiff(absPath, workDir string, staged bool) (string, error) {
-	// Prepare git diff command
+func runGitDiff(absPath, workDir string, mode DiffMode) (string, error) {
 	args := []string{"diff"}
 
-	if staged {
+	switch mode {
+	case DiffModeStaged:
 		args = append(args, "--staged")
-	} else {
-		// Show all changes including staged ones
+	case DiffModeAll:
+		args = append(args, "HEAD")
+	case DiffModeUnstaged:
+		// git diff (no additional args) shows unstaged changes
+	default:
 		args = append(args, "HEAD")
 	}
 
-	// Add unified context lines for better display
 	args = append(args, "-U5")
-
-	// No color - we'll apply our own
 	args = append(args, "--no-color")
 
-	// Add the path if it's not current directory
 	if absPath != "." {
 		args = append(args, "--", absPath)
 	}
 
-	// Execute git diff command
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
 
-	// Capture output
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Run the command
 	if err := cmd.Run(); err != nil {
-		// git diff returns exit code 1 if there are differences, which is not an error
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Check if it's just because there are diffs (exit code 1)
 			if exitErr.ExitCode() == 1 && stdout.Len() > 0 {
 				return stdout.String(), nil
 			}
 		}
 
-		// Real error
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
 			return "", fmt.Errorf("git diff failed: %s", errMsg)
@@ -124,6 +133,10 @@ func getRegularDiff(absPath, workDir string, staged bool) (string, error) {
 	}
 
 	return stdout.String(), nil
+}
+
+func shouldIncludeUntracked(mode DiffMode) bool {
+	return mode == DiffModeAll || mode == DiffModeUnstaged
 }
 
 func getUntrackedFilesDiff(workDir, filterPath string) (string, error) {
