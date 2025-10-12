@@ -159,6 +159,20 @@ critica/
 - Go 1.24 or higher
 - Git installed and in PATH
 
+## Makefile
+
+This repository includes a `Makefile` with common developer targets:
+
+- `make build` — build the `critica` binary
+- `make install` — install the package with `go install`
+- `make test` — run `go test ./...`
+- `make lint` — run `golangci-lint run` (requires `golangci-lint`)
+- `make fmt` — run `go fmt ./...`
+- `make vet` — run `go vet ./...`
+- `make ci` — run `fmt`, `vet`, `lint`, and `test`
+
+Use `make` or `make all` to build the binary.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues or pull requests.

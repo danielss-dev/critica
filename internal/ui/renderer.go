@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
@@ -20,6 +21,11 @@ type Renderer struct {
 	useColor  bool
 	unified   bool
 	termWidth int
+}
+
+type inlineSegment struct {
+	text    string
+	changed bool
 }
 
 // NewRenderer creates a new renderer
@@ -41,6 +47,90 @@ func NewRenderer(useColor, unified bool) *Renderer {
 		unified:   unified,
 		termWidth: width,
 	}
+}
+
+func computeLinePairs(lines []parser.Line) map[int]string {
+	pairs := make(map[int]string)
+
+	for i := 0; i < len(lines)-1; i++ {
+		current := lines[i]
+		next := lines[i+1]
+		if current.Type == parser.LineDeleted && next.Type == parser.LineAdded {
+			pairs[i] = next.Content
+			pairs[i+1] = current.Content
+			i++
+		}
+	}
+
+	return pairs
+}
+
+func splitInlineSegments(text, counterpart string) []inlineSegment {
+	if counterpart == "" {
+		return nil
+	}
+
+	textRunes := []rune(text)
+	counterRunes := []rune(counterpart)
+
+	prefix := commonPrefixLength(textRunes, counterRunes)
+
+	remainingText := textRunes[prefix:]
+	remainingCounter := counterRunes[prefix:]
+
+	suffix := commonSuffixLength(remainingText, remainingCounter)
+	if suffix > len(remainingText) {
+		suffix = len(remainingText)
+	}
+
+	var segments []inlineSegment
+
+	if prefix > 0 {
+		segments = append(segments, inlineSegment{text: string(textRunes[:prefix])})
+	}
+
+	changedEnd := len(textRunes) - suffix
+	if changedEnd < prefix {
+		changedEnd = prefix
+	}
+
+	if changedEnd > prefix {
+		segments = append(segments, inlineSegment{text: string(textRunes[prefix:changedEnd]), changed: true})
+	}
+
+	if suffix > 0 && changedEnd < len(textRunes) {
+		segments = append(segments, inlineSegment{text: string(textRunes[changedEnd:])})
+	}
+
+	if len(segments) == 0 {
+		return nil
+	}
+
+	return segments
+}
+
+func commonPrefixLength(a, b []rune) int {
+	limit := len(a)
+	if len(b) < limit {
+		limit = len(b)
+	}
+	count := 0
+	for count < limit && a[count] == b[count] {
+		count++
+	}
+	return count
+}
+
+func commonSuffixLength(a, b []rune) int {
+	limit := len(a)
+	if len(b) < limit {
+		limit = len(b)
+	}
+	count := 0
+	for count < limit && a[len(a)-1-count] == b[len(b)-1-count] {
+		count++
+	}
+	return count
 }
 
 // Render displays the diff for all files
@@ -76,14 +166,7 @@ func (r *Renderer) renderFile(file parser.FileDiff) {
 			currentStart := hunk.OldStart
 			linesSkipped := currentStart - prevEnd - 1
 
-			separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-			var separator string
-			if linesSkipped > 0 {
-				separator = separatorStyle.Render(fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped))
-			} else {
-				separator = separatorStyle.Render("⋯")
-			}
-			fmt.Println(separator)
+			fmt.Println(r.renderSkipSeparator(r.termWidth, linesSkipped))
 		}
 
 		if r.unified {
@@ -129,8 +212,10 @@ func (r *Renderer) renderHunk(hunk parser.Hunk, lexer chroma.Lexer) {
 	leftLines := []string{}
 	rightLines := []string{}
 	unchangedLineCounter := 0
+	pairs := computeLinePairs(hunk.Lines)
 
-	for _, line := range hunk.Lines {
+	for idx, line := range hunk.Lines {
+		pair := pairs[idx]
 		leftLine := ""
 		rightLine := ""
 		useAltStyle := false
@@ -138,19 +223,19 @@ func (r *Renderer) renderHunk(hunk parser.Hunk, lexer chroma.Lexer) {
 		switch line.Type {
 		case parser.LineDeleted:
 			// Show on left only
-			leftLine = r.formatLine(line, columnWidth, lexer, true, false)
-			rightLine = r.formatEmptyLine(columnWidth, false)
+			leftLine = r.formatLine(line, columnWidth, lexer, true, false, pair)
+			rightLine = r.formatEmptyLine(columnWidth)
 
 		case parser.LineAdded:
 			// Show on right only
-			leftLine = r.formatEmptyLine(columnWidth, false)
-			rightLine = r.formatLine(line, columnWidth, lexer, false, false)
+			leftLine = r.formatEmptyLine(columnWidth)
+			rightLine = r.formatLine(line, columnWidth, lexer, false, false, pair)
 
 		case parser.LineUnchanged:
 			// Show on both sides with alternating style
 			useAltStyle = unchangedLineCounter%2 == 1
-			leftLine = r.formatLine(line, columnWidth, lexer, true, useAltStyle)
-			rightLine = r.formatLine(line, columnWidth, lexer, false, useAltStyle)
+			leftLine = r.formatLine(line, columnWidth, lexer, true, useAltStyle, "")
+			rightLine = r.formatLine(line, columnWidth, lexer, false, useAltStyle, "")
 			unchangedLineCounter++
 		}
 
@@ -168,8 +253,10 @@ func (r *Renderer) renderHunk(hunk parser.Hunk, lexer chroma.Lexer) {
 // renderHunkUnified renders a single hunk in unified diff format
 func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 	unchangedLineCounter := 0
+	pairs := computeLinePairs(hunk.Lines)
 
-	for _, line := range hunk.Lines {
+	for idx, line := range hunk.Lines {
+		pair := pairs[idx]
 		// Determine line number and prefix
 		var lineNum int
 		var prefix string
@@ -210,13 +297,8 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 				Render(lineNumStr)
 		}
 
-		// Format content
-		content := line.Content
-
-		// Apply syntax highlighting if enabled
-		if r.useColor && lexer != nil {
-			content = r.highlightCode(content, lexer)
-		}
+		// Format content with inline diff awareness
+		content := r.buildLineContent(line, lexer, pair)
 
 		// Apply line style based on type with alternating rows
 		var lineStyle lipgloss.Style
@@ -234,6 +316,8 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 					lineStyle = r.theme.UnchangedLineStyleAlt
 				}
 				unchangedLineCounter++
+			default:
+				lineStyle = lipgloss.NewStyle()
 			}
 		} else {
 			lineStyle = lipgloss.NewStyle()
@@ -241,17 +325,66 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 
 		// Combine line number, prefix, and content
 		fullLine := lineNumStr + " " + prefix + " " + content
-
-		if r.useColor {
-			fmt.Println(lineStyle.Render(fullLine))
-		} else {
-			fmt.Println(fullLine)
+		width := r.termWidth
+		textWidth := lipgloss.Width(fullLine)
+		if width < textWidth {
+			width = textWidth
 		}
+		rendered := lineStyle.Copy().Width(width).Render(fullLine)
+		if r.useColor {
+			switch line.Type {
+			case parser.LineDeleted:
+				rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)
+			case parser.LineAdded:
+				rendered = applyPersistentBackground(rendered, r.theme.AddedBg)
+			}
+		}
+
+		fmt.Println(rendered)
 	}
 }
 
+func (r *Renderer) buildLineContent(line parser.Line, lexer chroma.Lexer, counterpart string) string {
+	if !r.useColor {
+		return line.Content
+	}
+
+	segments := splitInlineSegments(line.Content, counterpart)
+	if len(segments) == 0 {
+		if lexer != nil {
+			return r.highlightCode(line.Content, lexer)
+		}
+		return line.Content
+	}
+
+	var builder strings.Builder
+
+	for _, segment := range segments {
+		if segment.text == "" {
+			continue
+		}
+
+		if segment.changed {
+			inlineStyle := r.theme.InlineDeletedStyle
+			if line.Type == parser.LineAdded {
+				inlineStyle = r.theme.InlineAddedStyle
+			}
+			builder.WriteString(inlineStyle.Render(segment.text))
+			continue
+		}
+
+		if lexer != nil {
+			builder.WriteString(r.highlightCode(segment.text, lexer))
+		} else {
+			builder.WriteString(segment.text)
+		}
+	}
+
+	return builder.String()
+}
+
 // formatLine formats a single line with line number and content
-func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, isLeft bool, useAltStyle bool) string {
+func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, isLeft bool, useAltStyle bool, counterpart string) string {
 	// Get line number
 	lineNum := line.OldLineNum
 	if !isLeft {
@@ -281,13 +414,8 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 			Render(lineNumStr)
 	}
 
-	// Format content
-	content := line.Content
-
-	// Apply syntax highlighting if enabled
-	if r.useColor && lexer != nil {
-		content = r.highlightCode(content, lexer)
-	}
+	// Format content with optional inline highlighting
+	content := r.buildLineContent(line, lexer, counterpart)
 
 	// Truncate or pad content to fit width
 	contentWidth := width - 5 // 4 for line number, 1 for space
@@ -298,35 +426,39 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	if r.useColor {
 		switch line.Type {
 		case parser.LineDeleted:
-			lineStyle = r.theme.DeletedLineStyle
+			lineStyle = r.theme.DeletedLineStyle.Copy().Width(width)
 		case parser.LineAdded:
-			lineStyle = r.theme.AddedLineStyle
+			lineStyle = r.theme.AddedLineStyle.Copy().Width(width)
 		case parser.LineUnchanged:
 			if useAltStyle {
-				lineStyle = r.theme.UnchangedLineStyleAlt
+				lineStyle = r.theme.UnchangedLineStyleAlt.Copy().Width(width)
 			} else {
-				lineStyle = r.theme.UnchangedLineStyle
+				lineStyle = r.theme.UnchangedLineStyle.Copy().Width(width)
 			}
+		default:
+			lineStyle = lipgloss.NewStyle().Width(width)
 		}
 	} else {
-		lineStyle = lipgloss.NewStyle()
+		lineStyle = lipgloss.NewStyle().Width(width)
 	}
 
 	// Combine line number and content
 	fullLine := lineNumStr + " " + content
 
+	rendered := lineStyle.Render(fullLine)
 	if r.useColor {
-		if line.Type == parser.LineUnchanged {
-			rendered := lineStyle.Render(fullLine)
-			return lipgloss.NewStyle().Width(width).Render(rendered)
+		switch line.Type {
+		case parser.LineDeleted:
+			rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)
+		case parser.LineAdded:
+			rendered = applyPersistentBackground(rendered, r.theme.AddedBg)
 		}
-		return lineStyle.Width(width).Render(fullLine)
 	}
-	return r.padRight(fullLine, width)
+	return rendered
 }
 
 // formatEmptyLine creates an empty line for the split screen
-func (r *Renderer) formatEmptyLine(width int, useAltStyle bool) string {
+func (r *Renderer) formatEmptyLine(width int) string {
 	emptyLine := strings.Repeat(" ", width)
 	// No background for empty lines to blend with terminal
 	return emptyLine
@@ -361,15 +493,6 @@ func (r *Renderer) fitContent(content string, width int) string {
 	// Pad with spaces
 	padding := width - len(plainContent)
 	return content + strings.Repeat(" ", padding)
-}
-
-// padRight pads a string to the right to reach the desired width
-func (r *Renderer) padRight(s string, width int) string {
-	plainLen := len(stripAnsi(s))
-	if plainLen >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-plainLen)
 }
 
 // highlightCode applies syntax highlighting to code
@@ -436,4 +559,75 @@ func stripAnsi(s string) string {
 	}
 
 	return result.String()
+}
+
+func applyPersistentBackground(s string, color lipgloss.Color) string {
+	r, g, b, ok := parseHexColor(string(color))
+	if !ok {
+		return s
+	}
+
+	bgSeq := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+	resetSeq := "\x1b[49m"
+
+	var builder strings.Builder
+	builder.Grow(len(s) + len(bgSeq)*4)
+	builder.WriteString(bgSeq)
+
+	inEscape := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		builder.WriteByte(ch)
+		if ch == '\x1b' {
+			inEscape = true
+		} else if inEscape && ch == 'm' {
+			inEscape = false
+			if i < len(s)-1 {
+				builder.WriteString(bgSeq)
+			}
+		}
+	}
+
+	builder.WriteString(resetSeq)
+	return builder.String()
+}
+
+func (r *Renderer) renderSkipSeparator(width int, linesSkipped int) string {
+	separatorText := "⋯"
+	if linesSkipped > 0 {
+		separatorText = fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped)
+	}
+
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	textWidth := lipgloss.Width(separatorText)
+	if width < textWidth {
+		width = textWidth
+	}
+	if width > 0 {
+		style = style.Copy().Width(width).Align(lipgloss.Center)
+	}
+
+	return style.Render(separatorText)
+}
+
+func parseHexColor(value string) (int, int, int, bool) {
+	if len(value) == 0 {
+		return 0, 0, 0, false
+	}
+	if value[0] == '#' {
+		value = value[1:]
+	}
+	if len(value) != 6 {
+		return 0, 0, 0, false
+	}
+
+	n, err := strconv.ParseUint(value, 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	r := int((n >> 16) & 0xff)
+	g := int((n >> 8) & 0xff)
+	b := int(n & 0xff)
+	return r, g, b, true
 }

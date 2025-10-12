@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/bubbles/list"
@@ -13,6 +14,10 @@ import (
 )
 
 type viewMode int
+
+const (
+	maxFileListPathLength = 48
+)
 
 const (
 	fileListView viewMode = iota
@@ -38,13 +43,14 @@ type model struct {
 }
 
 type fileItem struct {
-	name   string
-	status string
-	index  int
+	fullPath    string
+	displayName string
+	status      string
+	index       int
 }
 
-func (f fileItem) FilterValue() string { return f.name }
-func (f fileItem) Title() string       { return f.name }
+func (f fileItem) FilterValue() string { return f.fullPath }
+func (f fileItem) Title() string       { return f.displayName }
 func (f fileItem) Description() string { return f.status }
 
 // Custom delegate with muted colors
@@ -99,10 +105,12 @@ func RunInteractive(files []parser.FileDiff, useColor, unified bool) error {
 		} else if file.IsRenamed {
 			status = "renamed"
 		}
+		displayName := shortenPath(file.NewPath, maxFileListPathLength)
 		items[i] = fileItem{
-			name:   file.NewPath,
-			status: status,
-			index:  i,
+			fullPath:    file.NewPath,
+			displayName: displayName,
+			status:      status,
+			index:       i,
 		}
 	}
 
@@ -354,7 +362,7 @@ func (m *model) filterList() {
 	var filteredItems []list.Item
 	for _, item := range m.fileItems {
 		fileItem := item.(fileItem)
-		if strings.Contains(strings.ToLower(fileItem.name), query) {
+		if strings.Contains(strings.ToLower(fileItem.fullPath), query) {
 			filteredItems = append(filteredItems, item)
 		}
 	}
@@ -480,7 +488,12 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 		status = "renamed"
 	}
 
-	lines = append(lines, headerStyle.Render(fmt.Sprintf("%s: %s", status, file.NewPath)))
+	headerWidth := width - len(status) - 2
+	if headerWidth < 10 {
+		headerWidth = maxFileListPathLength
+	}
+	displayPath := shortenPath(file.NewPath, headerWidth)
+	lines = append(lines, headerStyle.Render(fmt.Sprintf("%s: %s", status, displayPath)))
 	lines = append(lines, "")
 
 	// Render diff content
@@ -498,14 +511,7 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 			currentStart := hunk.OldStart
 			linesSkipped := currentStart - prevEnd - 1
 
-			separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-			var separatorText string
-			if linesSkipped > 0 {
-				separatorText = fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped)
-			} else {
-				separatorText = "⋯"
-			}
-			lines = append(lines, separatorStyle.Render(separatorText))
+			lines = append(lines, m.renderer.renderSkipSeparator(width, linesSkipped))
 			lineCount++
 		}
 
@@ -547,11 +553,8 @@ func (m model) renderLineCompact(line parser.Line, lexer chroma.Lexer, useAltSty
 		content = m.renderer.highlightCode(content, lexer)
 	}
 
-	// Truncate if too long
-	plainContent := stripAnsiLocal(prefix + content)
-	if len(plainContent) > maxWidth {
-		content = content[:maxWidth-3] + "..."
-	}
+	rawLine := prefix + content
+	rawLine = truncateWithEllipsisANSI(rawLine, maxWidth)
 
 	var lineStyle lipgloss.Style
 	if m.useColor {
@@ -567,18 +570,95 @@ func (m model) renderLineCompact(line parser.Line, lexer chroma.Lexer, useAltSty
 				lineStyle = m.renderer.theme.UnchangedLineStyle
 			}
 		}
-		return lineStyle.Render(prefix + content)
+		return lineStyle.Render(rawLine)
 	}
-	return prefix + content
+	return rawLine
+}
+
+func shortenPath(path string, max int) string {
+	if max <= 0 {
+		return path
+	}
+
+	pathRunes := []rune(path)
+	if len(pathRunes) <= max {
+		return path
+	}
+
+	separator := "/"
+	if strings.Contains(path, "\\") && !strings.Contains(path, "/") {
+		separator = "\\"
+	}
+
+	prefix := ".../"
+	if separator == "\\" {
+		prefix = "...\\"
+	}
+	prefixRunes := []rune(prefix)
+
+	if max <= len(prefixRunes) {
+		return string(pathRunes[len(pathRunes)-max:])
+	}
+
+	segments := strings.Split(path, separator)
+	if len(segments) <= 1 {
+		tailLen := max - len(prefixRunes)
+		if tailLen <= 0 {
+			tailLen = max
+		}
+		return prefix + string(pathRunes[len(pathRunes)-tailLen:])
+	}
+
+	var selected []string
+	total := len(prefixRunes)
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		if seg == "" {
+			continue
+		}
+
+		segLen := len([]rune(seg))
+		if len(selected) > 0 {
+			segLen += len([]rune(separator))
+		}
+
+		if total+segLen > max && len(selected) > 0 {
+			break
+		}
+
+		selected = append([]string{seg}, selected...)
+		total += segLen
+
+		if total >= max {
+			break
+		}
+	}
+
+	if len(selected) == 0 {
+		selected = []string{segments[len(segments)-1]}
+	}
+
+	remainder := strings.Join(selected, separator)
+	available := max - len(prefixRunes)
+	remainderRunes := []rune(remainder)
+	if available > 0 && len(remainderRunes) > available {
+		remainder = string(remainderRunes[len(remainderRunes)-available:])
+	}
+
+	return prefix + remainder
 }
 
 // padOrTruncate pads or truncates a string to the specified width
 func (m model) padOrTruncate(s string, width int) string {
-	plainLen := len(stripAnsiLocal(s))
-	if plainLen > width {
-		return s[:width]
+	if width <= 0 {
+		return ""
 	}
-	return s + strings.Repeat(" ", width-plainLen)
+	plainWidth := lipgloss.Width(stripAnsiLocal(s))
+	if plainWidth > width {
+		trimmed, _ := truncateVisibleANSI(s, width)
+		return ensureAnsiReset(trimmed)
+	}
+	return s + strings.Repeat(" ", width-plainWidth)
 }
 
 // stripAnsiLocal removes ANSI codes from a string
@@ -595,6 +675,104 @@ func stripAnsiLocal(s string) string {
 		}
 	}
 	return result.String()
+}
+
+func truncateWithEllipsisANSI(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	plainWidth := lipgloss.Width(stripAnsiLocal(s))
+	if plainWidth <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	trimmed, _ := truncateVisibleANSI(s, width-1)
+	trimmed = ensureAnsiReset(trimmed)
+	return insertBeforeTrailingANSI(trimmed, "…")
+}
+
+func truncateVisibleANSI(s string, width int) (string, bool) {
+	if width <= 0 {
+		return "", lipgloss.Width(stripAnsiLocal(s)) > 0
+	}
+	plainWidth := lipgloss.Width(stripAnsiLocal(s))
+	if plainWidth <= width {
+		return s, false
+	}
+	var builder strings.Builder
+	builder.Grow(len(s))
+	visible := 0
+	inEscape := false
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+		chunk := s[i : i+size]
+		if r == '\x1b' {
+			inEscape = true
+			builder.WriteString(chunk)
+			i += size
+			continue
+		}
+		if inEscape {
+			builder.WriteString(chunk)
+			if r == 'm' {
+				inEscape = false
+			}
+			i += size
+			continue
+		}
+
+		runeWidth := lipgloss.Width(string(r))
+		if visible+runeWidth > width {
+			break
+		}
+		builder.WriteString(chunk)
+		visible += runeWidth
+		i += size
+	}
+	return builder.String(), true
+}
+
+func ensureAnsiReset(s string) string {
+	const reset = "\x1b[0m"
+	if !strings.Contains(s, "\x1b[") {
+		return s
+	}
+	if strings.HasSuffix(s, reset) {
+		return s
+	}
+	return s + reset
+}
+
+func insertBeforeTrailingANSI(s, suffix string) string {
+	if suffix == "" {
+		return s
+	}
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+		start := end - size
+		if r == 'm' && start > 0 {
+			// Move backwards to find the escape introducer
+			i := start - 1
+			for i >= 0 && s[i] != '\x1b' {
+				i--
+			}
+			if i >= 0 && s[i] == '\x1b' {
+				end = i
+				continue
+			}
+		}
+		break
+	}
+	return s[:end] + suffix + s[end:]
 }
 
 func (m model) renderSearch() string {
@@ -644,7 +822,12 @@ func (m model) renderDiff() string {
 		viewMode = "Unified View"
 	}
 
-	title := fmt.Sprintf("%s (%d/%d) - %s", file.NewPath, m.selectedIdx+1, len(m.files), viewMode)
+	titleWidth := m.width - 20
+	if titleWidth < 20 {
+		titleWidth = maxFileListPathLength
+	}
+	titlePath := shortenPath(file.NewPath, titleWidth)
+	title := fmt.Sprintf("%s (%d/%d) - %s", titlePath, m.selectedIdx+1, len(m.files), viewMode)
 	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n\n")
 
@@ -672,25 +855,19 @@ func (m model) renderDiff() string {
 				currentStart := hunk.OldStart
 				linesSkipped := currentStart - prevEnd - 1
 
-				separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-				var separatorText string
-				if linesSkipped > 0 {
-					separatorText = fmt.Sprintf("⋯ (%d lines skipped) ⋯", linesSkipped)
-				} else {
-					separatorText = "⋯"
-				}
-				diffOutput.WriteString(separatorStyle.Render(separatorText))
+				diffOutput.WriteString(m.renderer.renderSkipSeparator(m.width, linesSkipped))
 				diffOutput.WriteString("\n")
 			}
 
 			if m.unified {
-				for _, line := range hunk.Lines {
+				pairs := computeLinePairs(hunk.Lines)
+				for idx, line := range hunk.Lines {
 					useAltStyle := false
 					if line.Type == parser.LineUnchanged {
 						useAltStyle = unchangedLineCounter%2 == 1
 						unchangedLineCounter++
 					}
-					diffOutput.WriteString(m.renderLineDirect(line, lexer, useAltStyle))
+					diffOutput.WriteString(m.renderLineDirect(line, lexer, useAltStyle, pairs[idx]))
 					diffOutput.WriteString("\n")
 				}
 			} else {
@@ -741,7 +918,6 @@ func (m model) renderDiff() string {
 			b.WriteString(scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines)))
 		}
 	}
-	// test
 
 	b.WriteString("\n\n")
 
@@ -753,7 +929,7 @@ func (m model) renderDiff() string {
 	return b.String()
 }
 
-func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyle bool) string {
+func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyle bool, counterpart string) string {
 	var lineNum int
 	var prefix string
 
@@ -776,36 +952,45 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyl
 		lineNumStr = "    "
 	}
 
-	// Apply syntax highlighting to content
-	content := line.Content
-	if m.useColor && lexer != nil {
-		content = m.renderer.highlightCode(content, lexer)
+	content := m.renderer.buildLineContent(line, lexer, counterpart)
+
+	fullLine := lineNumStr + " " + prefix + " " + content
+	width := m.width
+	textWidth := lipgloss.Width(fullLine)
+	if width <= 0 || width < textWidth {
+		width = textWidth
 	}
 
 	var lineStyle lipgloss.Style
 	if m.useColor {
 		switch line.Type {
 		case parser.LineDeleted:
-			lineStyle = m.renderer.theme.DeletedLineStyle
+			lineStyle = m.renderer.theme.DeletedLineStyle.Copy().Width(width)
 		case parser.LineAdded:
-			lineStyle = m.renderer.theme.AddedLineStyle
+			lineStyle = m.renderer.theme.AddedLineStyle.Copy().Width(width)
 		case parser.LineUnchanged:
 			if useAltStyle {
-				lineStyle = m.renderer.theme.UnchangedLineStyleAlt
+				lineStyle = m.renderer.theme.UnchangedLineStyleAlt.Copy().Width(width)
 			} else {
-				lineStyle = m.renderer.theme.UnchangedLineStyle
+				lineStyle = m.renderer.theme.UnchangedLineStyle.Copy().Width(width)
 			}
+		default:
+			lineStyle = lipgloss.NewStyle().Width(width)
 		}
 	} else {
-		lineStyle = lipgloss.NewStyle()
+		lineStyle = lipgloss.NewStyle().Width(width)
 	}
 
-	fullLine := lineNumStr + " " + prefix + " " + content
-
+	rendered := lineStyle.Render(fullLine)
 	if m.useColor {
-		return lineStyle.Render(fullLine)
+		switch line.Type {
+		case parser.LineDeleted:
+			rendered = applyPersistentBackground(rendered, m.renderer.theme.DeletedBg)
+		case parser.LineAdded:
+			rendered = applyPersistentBackground(rendered, m.renderer.theme.AddedBg)
+		}
 	}
-	return fullLine
+	return rendered
 }
 
 func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
@@ -817,23 +1002,25 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 	}
 
 	unchangedLineCounter := 0
+	pairs := computeLinePairs(hunk.Lines)
 
-	for _, line := range hunk.Lines {
+	for idx, line := range hunk.Lines {
+		pair := pairs[idx]
 		leftLine := ""
 		rightLine := ""
 		useAltStyle := false
 
 		switch line.Type {
 		case parser.LineDeleted:
-			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, false)
-			rightLine = m.renderer.formatEmptyLine(columnWidth, false)
+			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, false, pair)
+			rightLine = m.renderer.formatEmptyLine(columnWidth)
 		case parser.LineAdded:
-			leftLine = m.renderer.formatEmptyLine(columnWidth, false)
-			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, false)
+			leftLine = m.renderer.formatEmptyLine(columnWidth)
+			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, false, pair)
 		case parser.LineUnchanged:
 			useAltStyle = unchangedLineCounter%2 == 1
-			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, useAltStyle)
-			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, useAltStyle)
+			leftLine = m.renderer.formatLine(line, columnWidth, lexer, true, useAltStyle, "")
+			rightLine = m.renderer.formatLine(line, columnWidth, lexer, false, useAltStyle, "")
 			unchangedLineCounter++
 		}
 
