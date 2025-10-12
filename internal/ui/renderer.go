@@ -316,9 +316,9 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	fullLine := lineNumStr + " " + content
 
 	if r.useColor {
-		// For unchanged lines, don't apply width to avoid forced background
 		if line.Type == parser.LineUnchanged {
-			return lineStyle.Render(r.padRight(fullLine, width))
+			rendered := lineStyle.Render(fullLine)
+			return lipgloss.NewStyle().Width(width).Render(rendered)
 		}
 		return lineStyle.Width(width).Render(fullLine)
 	}
