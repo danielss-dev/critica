@@ -90,6 +90,21 @@ critica internal/ui/renderer.go
 critica --staged
 ```
 
+### Configuration
+
+Critica loads optional defaults from `~/.config/critica/config.json` (the path provided by `os.UserConfigDir()`). Example:
+
+```json
+{
+  "interactive": true,
+  "unified": false,
+  "no_color": false,
+  "diff_mode": "all"
+}
+```
+
+Command-line flags always override configuration values.
+
 ### Interactive Mode
 
 Launch interactive mode with `-i` or `--interactive`:

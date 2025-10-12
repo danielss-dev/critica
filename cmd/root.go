@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/danielss-dev/critica/internal/config"
 	"github.com/danielss-dev/critica/internal/git"
 	"github.com/danielss-dev/critica/internal/parser"
 	"github.com/danielss-dev/critica/internal/ui"
@@ -16,6 +17,8 @@ var (
 	noColor     bool
 	unified     bool
 	interactive bool
+
+	appConfig *config.Config
 )
 
 var rootCmd = &cobra.Command{
@@ -43,6 +46,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable color output")
 	rootCmd.Flags().BoolVarP(&unified, "unified", "u", false, "Show unified diff view (non-split)")
 	rootCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive mode with fuzzy finder and collapsible files")
+	rootCmd.PersistentPreRunE = applyConfig
 }
 
 func Execute() {
@@ -71,6 +75,15 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	diffMode := git.DiffModeAll
 	if showStaged {
 		diffMode = git.DiffModeStaged
+	} else if appConfig != nil {
+		switch appConfig.DiffMode {
+		case config.DiffModeAll:
+			diffMode = git.DiffModeAll
+		case config.DiffModeUnstaged:
+			diffMode = git.DiffModeUnstaged
+		case config.DiffModeStaged:
+			diffMode = git.DiffModeStaged
+		}
 	}
 
 	// Get the git diff
@@ -124,6 +137,41 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	// Render the diff statically
 	renderer := ui.NewRenderer(!noColor, unified)
 	renderer.Render(files)
+
+	return nil
+}
+
+func applyConfig(cmd *cobra.Command, _ []string) error {
+	if appConfig != nil {
+		return nil
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	appConfig = cfg
+
+	applyBool := func(flagName string, target *bool, value *bool) {
+		if value == nil {
+			return
+		}
+		if cmd.Flags().Changed(flagName) {
+			return
+		}
+		*target = *value
+	}
+
+	applyBool("interactive", &interactive, cfg.Interactive)
+	applyBool("unified", &unified, cfg.Unified)
+	applyBool("no-color", &noColor, cfg.NoColor)
+
+	if cfg.DiffMode == config.DiffModeStaged {
+		if !cmd.Flags().Changed("staged") && !cmd.Flags().Changed("cached") {
+			staged = true
+		}
+	}
 
 	return nil
 }
