@@ -1,0 +1,34 @@
+name: Build and Release Go Binary
+
+on:
+  push:
+    tags:
+      - 'v*' # Runs on version tags (e.g., v1.2.3)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24' # Use your required Go version
+
+
+      - name: Build binary
+        run: |
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o critica-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+
+      - name: Upload binary
+        uses: softprops/action-gh-release@v1
+        with:
+          files: critica-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
