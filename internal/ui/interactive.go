@@ -638,12 +638,13 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 	unchangedLineCounter := 0
 	lineCount := 0
 	maxLines := m.height - 8 // Leave room for header and help
+	if maxLines < 1 {
+		maxLines = 5
+	}
 
 	for hunkIdx, hunk := range file.Hunks {
-		// Add separator between hunks to show line jumps
 		if hunkIdx > 0 {
 			prevHunk := file.Hunks[hunkIdx-1]
-			// Calculate the line skip
 			prevEnd := prevHunk.OldStart + prevHunk.OldLines - 1
 			currentStart := hunk.OldStart
 			linesSkipped := currentStart - prevEnd - 1
@@ -652,7 +653,8 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 			lineCount++
 		}
 
-		for _, line := range hunk.Lines {
+		pairs := computeLinePairs(hunk.Lines)
+		for idx, line := range hunk.Lines {
 			if lineCount >= maxLines {
 				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("... (press 'o' to view full diff)"))
 				return lines
@@ -664,52 +666,13 @@ func (m model) renderPreviewForFile(fileIdx int, width int) []string {
 				unchangedLineCounter++
 			}
 
-			renderedLine := m.renderLineCompact(line, lexer, useAltStyle, width)
+			renderedLine := m.renderLineDirect(line, lexer, useAltStyle, pairs[idx], width)
 			lines = append(lines, renderedLine)
 			lineCount++
 		}
 	}
 
 	return lines
-}
-
-// renderLineCompact renders a single line in compact format for preview
-func (m model) renderLineCompact(line parser.Line, lexer chroma.Lexer, useAltStyle bool, maxWidth int) string {
-	var prefix string
-	switch line.Type {
-	case parser.LineDeleted:
-		prefix = "- "
-	case parser.LineAdded:
-		prefix = "+ "
-	case parser.LineUnchanged:
-		prefix = "  "
-	}
-
-	content := line.Content
-	if m.useColor && lexer != nil {
-		content = m.renderer.highlightCode(content, lexer)
-	}
-
-	rawLine := prefix + content
-	rawLine = truncateWithEllipsisANSI(rawLine, maxWidth)
-
-	var lineStyle lipgloss.Style
-	if m.useColor {
-		switch line.Type {
-		case parser.LineDeleted:
-			lineStyle = m.renderer.theme.DeletedLineStyle
-		case parser.LineAdded:
-			lineStyle = m.renderer.theme.AddedLineStyle
-		case parser.LineUnchanged:
-			if useAltStyle {
-				lineStyle = m.renderer.theme.UnchangedLineStyleAlt
-			} else {
-				lineStyle = m.renderer.theme.UnchangedLineStyle
-			}
-		}
-		return lineStyle.Render(rawLine)
-	}
-	return rawLine
 }
 
 func shortenPath(path string, max int) string {
@@ -814,22 +777,6 @@ func stripAnsiLocal(s string) string {
 	return result.String()
 }
 
-func truncateWithEllipsisANSI(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	plainWidth := lipgloss.Width(stripAnsiLocal(s))
-	if plainWidth <= width {
-		return s
-	}
-	if width == 1 {
-		return "…"
-	}
-	trimmed, _ := truncateVisibleANSI(s, width-1)
-	trimmed = ensureAnsiReset(trimmed)
-	return insertBeforeTrailingANSI(trimmed, "…")
-}
-
 func truncateVisibleANSI(s string, width int) (string, bool) {
 	if width <= 0 {
 		return "", lipgloss.Width(stripAnsiLocal(s)) > 0
@@ -883,33 +830,6 @@ func ensureAnsiReset(s string) string {
 		return s
 	}
 	return s + reset
-}
-
-func insertBeforeTrailingANSI(s, suffix string) string {
-	if suffix == "" {
-		return s
-	}
-	end := len(s)
-	for end > 0 {
-		r, size := utf8.DecodeLastRuneInString(s[:end])
-		if r == utf8.RuneError && size == 0 {
-			break
-		}
-		start := end - size
-		if r == 'm' && start > 0 {
-			// Move backwards to find the escape introducer
-			i := start - 1
-			for i >= 0 && s[i] != '\x1b' {
-				i--
-			}
-			if i >= 0 && s[i] == '\x1b' {
-				end = i
-				continue
-			}
-		}
-		break
-	}
-	return s[:end] + suffix + s[end:]
 }
 
 func (m model) renderSearch() string {
@@ -1004,7 +924,7 @@ func (m model) renderDiff() string {
 						useAltStyle = unchangedLineCounter%2 == 1
 						unchangedLineCounter++
 					}
-					diffOutput.WriteString(m.renderLineDirect(line, lexer, useAltStyle, pairs[idx]))
+					diffOutput.WriteString(m.renderLineDirect(line, lexer, useAltStyle, pairs[idx], m.width))
 					diffOutput.WriteString("\n")
 				}
 			} else {
@@ -1066,7 +986,7 @@ func (m model) renderDiff() string {
 	return b.String()
 }
 
-func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyle bool, counterpart string) string {
+func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyle bool, counterpart string, availableWidth int) string {
 	var lineNum int
 	var prefix string
 
@@ -1092,9 +1012,12 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyl
 	content := m.renderer.buildLineContent(line, lexer, counterpart)
 
 	fullLine := lineNumStr + " " + prefix + " " + content
-	width := m.width
+	width := availableWidth
 	textWidth := lipgloss.Width(fullLine)
-	if width <= 0 || width < textWidth {
+	if width <= 0 {
+		width = textWidth
+	}
+	if width < textWidth {
 		width = textWidth
 	}
 
@@ -1119,14 +1042,7 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyl
 	}
 
 	rendered := lineStyle.Render(fullLine)
-	if m.useColor && m.renderer.theme.UseLineBackground {
-		switch line.Type {
-		case parser.LineDeleted:
-			rendered = applyPersistentBackground(rendered, m.renderer.theme.DeletedBg)
-		case parser.LineAdded:
-			rendered = applyPersistentBackground(rendered, m.renderer.theme.AddedBg)
-		}
-	}
+	rendered = m.renderer.applyLineBackground(rendered, line.Type, useAltStyle)
 	return rendered
 }
 

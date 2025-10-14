@@ -99,9 +99,25 @@ Critica loads optional defaults from `~/.config/critica/config.json` (the path p
   "interactive": true,
   "unified": false,
   "no_color": false,
-  "diff_mode": "all"
+  "diff_mode": "all",
+  "diff_style": "filled",
+  "added_text_color": "#8df0b5",
+  "deleted_text_color": "#ff8ba3"
 }
 ```
+
+**Diff style options**
+
+- `default` – transparent background for unchanged lines with colored gutters
+- `patch` – classic git patch palette without filled backgrounds
+- `filled` – fully colored rows for additions and deletions with a muted neutral background
+
+**Color overrides**
+
+- `added_text_color` – six-digit hex color (with or without `#`) applied to added text and line numbers
+- `deleted_text_color` – six-digit hex color applied to deleted text and line numbers
+
+If omitted, the built-in theme colors are used. Invalid hex values are ignored during config normalization.
 
 Command-line flags always override configuration values.
 

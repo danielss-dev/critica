@@ -19,6 +19,7 @@ const (
 const (
 	DiffStyleDefault = "default"
 	DiffStylePatch   = "patch"
+	DiffStyleFilled  = "filled"
 )
 
 type Config struct {
@@ -80,7 +81,7 @@ func (c *Config) normalize() error {
 
 	style := strings.ToLower(strings.TrimSpace(c.DiffStyle))
 	switch style {
-	case "", DiffStyleDefault, DiffStylePatch:
+	case "", DiffStyleDefault, DiffStylePatch, DiffStyleFilled:
 		c.DiffStyle = style
 	default:
 		return fmt.Errorf("invalid diff_style %q", c.DiffStyle)
@@ -107,9 +108,7 @@ func normalizeHexColor(value string) (string, error) {
 		return "", nil
 	}
 
-	if strings.HasPrefix(trimmed, "#") {
-		trimmed = trimmed[1:]
-	}
+	trimmed = strings.TrimPrefix(trimmed, "#")
 
 	if len(trimmed) != 6 {
 		return "", errors.New("must be a 6-digit hex color")

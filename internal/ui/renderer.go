@@ -273,6 +273,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 		// Determine line number and prefix
 		var lineNum int
 		var prefix string
+		useAltStyle := false
 
 		switch line.Type {
 		case parser.LineDeleted:
@@ -284,6 +285,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 		case parser.LineUnchanged:
 			lineNum = line.NewLineNum
 			prefix = " "
+			useAltStyle = unchangedLineCounter%2 == 1
 		}
 
 		// Format line number
@@ -322,11 +324,10 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 			case parser.LineAdded:
 				lineStyle = r.theme.AddedLineStyle
 			case parser.LineUnchanged:
-				// Alternate between two styles for unchanged lines
-				if unchangedLineCounter%2 == 0 {
-					lineStyle = r.theme.UnchangedLineStyle
-				} else {
+				if useAltStyle {
 					lineStyle = r.theme.UnchangedLineStyleAlt
+				} else {
+					lineStyle = r.theme.UnchangedLineStyle
 				}
 				unchangedLineCounter++
 			default:
@@ -344,14 +345,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 			width = textWidth
 		}
 		rendered := lineStyle.Copy().Width(width).Render(fullLine)
-		if r.useColor && r.theme.UseLineBackground {
-			switch line.Type {
-			case parser.LineDeleted:
-				rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)
-			case parser.LineAdded:
-				rendered = applyPersistentBackground(rendered, r.theme.AddedBg)
-			}
-		}
+		rendered = r.applyLineBackground(rendered, line.Type, useAltStyle)
 
 		fmt.Println(rendered)
 	}
@@ -459,14 +453,7 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	fullLine := lineNumStr + " " + content
 
 	rendered := lineStyle.Render(fullLine)
-	if r.useColor && r.theme.UseLineBackground {
-		switch line.Type {
-		case parser.LineDeleted:
-			rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)
-		case parser.LineAdded:
-			rendered = applyPersistentBackground(rendered, r.theme.AddedBg)
-		}
-	}
+	rendered = r.applyLineBackground(rendered, line.Type, useAltStyle)
 	return rendered
 }
 
@@ -572,6 +559,33 @@ func stripAnsi(s string) string {
 	}
 
 	return result.String()
+}
+
+func (r *Renderer) backgroundForLineType(lineType parser.LineType, useAlt bool) lipgloss.Color {
+	switch lineType {
+	case parser.LineDeleted:
+		return r.theme.DeletedBg
+	case parser.LineAdded:
+		return r.theme.AddedBg
+	case parser.LineUnchanged, parser.LineContext:
+		if useAlt {
+			return r.theme.UnchangedBgStripe
+		}
+		return r.theme.UnchangedBg
+	default:
+		return ""
+	}
+}
+
+func (r *Renderer) applyLineBackground(s string, lineType parser.LineType, useAlt bool) string {
+	if !r.useColor || !r.theme.UseLineBackground {
+		return s
+	}
+	color := r.backgroundForLineType(lineType, useAlt)
+	if color == "" {
+		return s
+	}
+	return applyPersistentBackground(s, color)
 }
 
 func applyPersistentBackground(s string, color lipgloss.Color) string {
