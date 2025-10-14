@@ -104,6 +104,17 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse diff: %w", err)
 	}
 
+	rendererOpts := ui.RendererOptions{
+		UseColor: !noColor,
+		Unified:  unified,
+	}
+
+	if appConfig != nil {
+		rendererOpts.DiffStyle = appConfig.DiffStyle
+		rendererOpts.AddedTextColor = appConfig.AddedTextColor
+		rendererOpts.DeletedTextColor = appConfig.DeletedTextColor
+	}
+
 	// Run in interactive mode or static mode
 	if interactive {
 		var stagedFiles []parser.FileDiff
@@ -131,11 +142,11 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		return ui.RunInteractive(files, stagedFiles, unstagedFiles, !noColor, unified)
+		return ui.RunInteractive(files, stagedFiles, unstagedFiles, rendererOpts)
 	}
 
 	// Render the diff statically
-	renderer := ui.NewRenderer(!noColor, unified)
+	renderer := ui.NewRenderer(rendererOpts)
 	renderer.Render(files)
 
 	return nil

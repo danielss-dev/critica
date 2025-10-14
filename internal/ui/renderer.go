@@ -15,6 +15,15 @@ import (
 	"golang.org/x/term"
 )
 
+// RendererOptions describes configuration for the renderer visuals.
+type RendererOptions struct {
+	UseColor         bool
+	Unified          bool
+	DiffStyle        string
+	AddedTextColor   string
+	DeletedTextColor string
+}
+
 // Renderer handles the display of diff output
 type Renderer struct {
 	theme     *Theme
@@ -29,22 +38,26 @@ type inlineSegment struct {
 }
 
 // NewRenderer creates a new renderer
-func NewRenderer(useColor, unified bool) *Renderer {
+func NewRenderer(opts RendererOptions) *Renderer {
 	// Get terminal width
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width == 0 {
 		width = 120 // Default width
 	}
 
-	theme := NewTheme()
-	if !useColor {
+	theme := NewTheme(ThemeOptions{
+		DiffStyle:        opts.DiffStyle,
+		AddedTextColor:   opts.AddedTextColor,
+		DeletedTextColor: opts.DeletedTextColor,
+	})
+	if !opts.UseColor {
 		theme = NoColorTheme()
 	}
 
 	return &Renderer{
 		theme:     theme,
-		useColor:  useColor,
-		unified:   unified,
+		useColor:  opts.UseColor,
+		unified:   opts.Unified,
 		termWidth: width,
 	}
 }
@@ -331,7 +344,7 @@ func (r *Renderer) renderHunkUnified(hunk parser.Hunk, lexer chroma.Lexer) {
 			width = textWidth
 		}
 		rendered := lineStyle.Copy().Width(width).Render(fullLine)
-		if r.useColor {
+		if r.useColor && r.theme.UseLineBackground {
 			switch line.Type {
 			case parser.LineDeleted:
 				rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)
@@ -446,7 +459,7 @@ func (r *Renderer) formatLine(line parser.Line, width int, lexer chroma.Lexer, i
 	fullLine := lineNumStr + " " + content
 
 	rendered := lineStyle.Render(fullLine)
-	if r.useColor {
+	if r.useColor && r.theme.UseLineBackground {
 		switch line.Type {
 		case parser.LineDeleted:
 			rendered = applyPersistentBackground(rendered, r.theme.DeletedBg)

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -43,40 +45,51 @@ type Theme struct {
 	LineNumStyle          lipgloss.Style
 	FileHeaderStyle       lipgloss.Style
 	SeparatorStyle        lipgloss.Style
+
+	UseLineBackground bool
 }
 
-// NewTheme creates a new theme with default colors
-func NewTheme() *Theme {
+type ThemeOptions struct {
+	DiffStyle        string
+	AddedTextColor   string
+	DeletedTextColor string
+}
+
+// NewTheme creates a new theme with styles based on the provided options.
+func NewTheme(opts ThemeOptions) *Theme {
+	switch strings.ToLower(strings.TrimSpace(opts.DiffStyle)) {
+	case "patch":
+		return newPatchTheme(opts)
+	default:
+		return newDefaultTheme(opts)
+	}
+}
+
+func newDefaultTheme(opts ThemeOptions) *Theme {
+	deletedFg := selectColor(lipgloss.Color("#c86b6b"), opts.DeletedTextColor)
+	addedFg := selectColor(lipgloss.Color("#6bc86b"), opts.AddedTextColor)
+
 	t := &Theme{
-		// Background colors - richer to emphasize changes
-		DeletedBg:         lipgloss.Color("#3a2020"), // Very subtle dark red
-		AddedBg:           lipgloss.Color("#203a20"), // Very subtle dark green
-		UnchangedBg:       lipgloss.Color(""),        // Transparent/default terminal bg
+		DeletedBg:         lipgloss.Color("#3a2020"),
+		AddedBg:           lipgloss.Color("#203a20"),
+		UnchangedBg:       lipgloss.Color(""),
 		UnchangedBgStripe: lipgloss.Color("#1a1a1a"),
 		InlineDeletedBg:   lipgloss.Color("#6b2c2c"),
 		InlineAddedBg:     lipgloss.Color("#2c6b2c"),
-
-		// Foreground colors - keep muted but legible
-		DeletedFg:       lipgloss.Color("#c86b6b"),
-		AddedFg:         lipgloss.Color("#6bc86b"),
-		UnchangedFg:     lipgloss.Color("#a0a0a0"),
-		InlineDeletedFg: lipgloss.Color("#ffeeee"),
-		InlineAddedFg:   lipgloss.Color("#eeffee"),
-
-		// Line numbers - very subtle
-		LineNumDeleted:   lipgloss.Color("#7a5f5f"),
-		LineNumAdded:     lipgloss.Color("#5f7a5f"),
-		LineNumUnchanged: lipgloss.Color("#4a4a4a"),
-
-		// Headers
-		FileHeaderBg: lipgloss.Color("#2a2a2a"),
-		FileHeaderFg: lipgloss.Color("#d0d0d0"),
-
-		// Borders
-		BorderColor: lipgloss.Color("#333333"),
+		DeletedFg:         deletedFg,
+		AddedFg:           addedFg,
+		UnchangedFg:       lipgloss.Color("#a0a0a0"),
+		InlineDeletedFg:   lipgloss.Color("#ffeeee"),
+		InlineAddedFg:     lipgloss.Color("#eeffee"),
+		LineNumDeleted:    dimOrOverride(lipgloss.Color("#7a5f5f"), opts.DeletedTextColor),
+		LineNumAdded:      dimOrOverride(lipgloss.Color("#5f7a5f"), opts.AddedTextColor),
+		LineNumUnchanged:  lipgloss.Color("#4a4a4a"),
+		FileHeaderBg:      lipgloss.Color("#2a2a2a"),
+		FileHeaderFg:      lipgloss.Color("#d0d0d0"),
+		BorderColor:       lipgloss.Color("#333333"),
+		UseLineBackground: true,
 	}
 
-	// Create styles
 	t.DeletedLineStyle = lipgloss.NewStyle().
 		Background(t.DeletedBg).
 		Foreground(t.DeletedFg).
@@ -87,7 +100,6 @@ func NewTheme() *Theme {
 		Foreground(t.AddedFg).
 		Bold(true)
 
-	// Unchanged lines have no background to blend with terminal
 	t.UnchangedLineStyle = lipgloss.NewStyle().
 		Foreground(t.UnchangedFg)
 
@@ -121,9 +133,89 @@ func NewTheme() *Theme {
 	return t
 }
 
+func newPatchTheme(opts ThemeOptions) *Theme {
+	deletedFg := selectColor(lipgloss.Color("#ff6b6b"), opts.DeletedTextColor)
+	addedFg := selectColor(lipgloss.Color("#6bff95"), opts.AddedTextColor)
+
+	t := &Theme{
+		DeletedBg:         lipgloss.Color(""),
+		AddedBg:           lipgloss.Color(""),
+		UnchangedBg:       lipgloss.Color(""),
+		UnchangedBgStripe: lipgloss.Color(""),
+		InlineDeletedBg:   lipgloss.Color("#ff6363"),
+		InlineAddedBg:     lipgloss.Color("#34d399"),
+		DeletedFg:         deletedFg,
+		AddedFg:           addedFg,
+		UnchangedFg:       lipgloss.Color("#c0c0c0"),
+		InlineDeletedFg:   lipgloss.Color("#1f2937"),
+		InlineAddedFg:     lipgloss.Color("#1f2937"),
+		LineNumDeleted:    deletedFg,
+		LineNumAdded:      addedFg,
+		LineNumUnchanged:  lipgloss.Color("#6b7280"),
+		FileHeaderBg:      lipgloss.Color("#2a2a2a"),
+		FileHeaderFg:      lipgloss.Color("#d0d0d0"),
+		BorderColor:       lipgloss.Color("#333333"),
+		UseLineBackground: false,
+	}
+
+	t.DeletedLineStyle = lipgloss.NewStyle().
+		Foreground(t.DeletedFg).
+		Bold(true)
+
+	t.AddedLineStyle = lipgloss.NewStyle().
+		Foreground(t.AddedFg).
+		Bold(true)
+
+	t.UnchangedLineStyle = lipgloss.NewStyle().
+		Foreground(t.UnchangedFg)
+
+	t.UnchangedLineStyleAlt = lipgloss.NewStyle().
+		Foreground(t.UnchangedFg)
+
+	t.InlineDeletedStyle = lipgloss.NewStyle().
+		Background(t.InlineDeletedBg).
+		Foreground(t.InlineDeletedFg).
+		Bold(true)
+
+	t.InlineAddedStyle = lipgloss.NewStyle().
+		Background(t.InlineAddedBg).
+		Foreground(t.InlineAddedFg).
+		Bold(true)
+
+	t.LineNumStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Width(5).
+		Align(lipgloss.Right)
+
+	t.FileHeaderStyle = lipgloss.NewStyle().
+		Background(t.FileHeaderBg).
+		Foreground(t.FileHeaderFg).
+		Bold(true).
+		Padding(0, 1)
+
+	t.SeparatorStyle = lipgloss.NewStyle().
+		Foreground(t.BorderColor)
+
+	return t
+}
+
+func selectColor(defaultColor lipgloss.Color, override string) lipgloss.Color {
+	if override != "" {
+		return lipgloss.Color(override)
+	}
+	return defaultColor
+}
+
+func dimOrOverride(defaultColor lipgloss.Color, override string) lipgloss.Color {
+	if override != "" {
+		return lipgloss.Color(override)
+	}
+	return defaultColor
+}
+
 // NoColorTheme creates a theme without colors
 func NoColorTheme() *Theme {
-	t := &Theme{}
+	t := &Theme{UseLineBackground: false}
 
 	t.DeletedLineStyle = lipgloss.NewStyle()
 	t.AddedLineStyle = lipgloss.NewStyle()

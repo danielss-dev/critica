@@ -156,7 +156,7 @@ func newCustomDelegate() customDelegate {
 	return d
 }
 
-func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, useColor, unified bool) error {
+func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions) error {
 	delegate := newCustomDelegate()
 	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Changed Files"
@@ -187,9 +187,9 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, useC
 		viewMode:         fileListView,
 		selectedIdx:      -1,
 		filterMode:       filterAll,
-		useColor:         useColor,
-		unified:          unified,
-		renderer:         NewRenderer(useColor, unified),
+		useColor:         rendererOpts.UseColor,
+		unified:          rendererOpts.Unified,
+		renderer:         NewRenderer(rendererOpts),
 		previewCollapsed: false,
 	}
 
@@ -1119,7 +1119,7 @@ func (m model) renderLineDirect(line parser.Line, lexer chroma.Lexer, useAltStyl
 	}
 
 	rendered := lineStyle.Render(fullLine)
-	if m.useColor {
+	if m.useColor && m.renderer.theme.UseLineBackground {
 		switch line.Type {
 		case parser.LineDeleted:
 			rendered = applyPersistentBackground(rendered, m.renderer.theme.DeletedBg)
