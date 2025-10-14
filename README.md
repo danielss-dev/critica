@@ -198,4 +198,4 @@ MIT License
 
 ## Author
 
-Daniel Santos (@danielss-dev)
+Daniel Schwarz (@danielss-dev)
