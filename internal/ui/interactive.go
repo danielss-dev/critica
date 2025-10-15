@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/danielss-dev/critica/internal/ai/agent"
 	"github.com/danielss-dev/critica/internal/parser"
+	"github.com/danielss-dev/critica/internal/ui/layout"
 )
 
 type viewMode int
@@ -24,6 +25,7 @@ const (
 	fileListView viewMode = iota
 	diffView
 	searchMode
+	aiOptionsView
 	aiChatView
 	suggestionsView
 )
@@ -34,6 +36,15 @@ const (
 	filterAll fileFilter = iota
 	filterStaged
 	filterUnstaged
+)
+
+type aiAction int
+
+const (
+	aiActionAnalyze aiAction = iota
+	aiActionSuggest
+	aiActionExplain
+	aiActionChat
 )
 
 type model struct {
@@ -60,10 +71,17 @@ type model struct {
 	aiAgent            agent.Service
 	aiEnabled          bool
 	aiChat             *AIChatModel
+	aiChatContainer    layout.Container
 	showAIChat         bool
 	aiSuggestions      []string
 	showSuggestions    bool
 	selectedSuggestion int
+
+	// AI options menu fields
+	aiOptionsList    list.Model
+	aiOptionsItems   []list.Item
+	selectedAIOption int
+	previousViewMode viewMode // Store the view mode before opening AI options
 }
 
 type fileItem struct {
@@ -76,6 +94,16 @@ type fileItem struct {
 func (f fileItem) FilterValue() string { return f.fullPath }
 func (f fileItem) Title() string       { return f.displayName }
 func (f fileItem) Description() string { return f.status }
+
+type aiOptionItem struct {
+	action      aiAction
+	title       string
+	description string
+}
+
+func (a aiOptionItem) FilterValue() string { return a.title }
+func (a aiOptionItem) Title() string       { return a.title }
+func (a aiOptionItem) Description() string { return a.description }
 
 func filterDisplayName(filter fileFilter) string {
 	switch filter {
@@ -109,6 +137,31 @@ func buildFileItems(files []parser.FileDiff) []list.Item {
 		}
 	}
 	return items
+}
+
+func buildAIOptionsItems() []list.Item {
+	return []list.Item{
+		aiOptionItem{
+			action:      aiActionAnalyze,
+			title:       "Analyze",
+			description: "Review code for issues and quality",
+		},
+		aiOptionItem{
+			action:      aiActionSuggest,
+			title:       "Suggest",
+			description: "Generate improvement suggestions",
+		},
+		aiOptionItem{
+			action:      aiActionExplain,
+			title:       "Explain",
+			description: "Explain what the changes do",
+		},
+		aiOptionItem{
+			action:      aiActionChat,
+			title:       "Chat",
+			description: "Open general chat interface",
+		},
+	}
 }
 
 func newCollapsedMap(length int) map[int]bool {
@@ -185,6 +238,20 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 	l.SetShowHelp(false)
 	l.KeyMap.Quit.Unbind()
 
+	// Create AI options list
+	aiOptionsDelegate := newCustomDelegate()
+	aiOptionsList := list.New([]list.Item{}, aiOptionsDelegate, 0, 0)
+	aiOptionsList.Title = "AI Options"
+	aiOptionsList.Styles.Title = lipgloss.NewStyle().
+		Background(lipgloss.Color("#1f2937")).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Padding(0, 1).
+		Bold(true)
+	aiOptionsList.SetShowStatusBar(false)
+	aiOptionsList.SetFilteringEnabled(false)
+	aiOptionsList.SetShowHelp(false)
+	aiOptionsList.KeyMap.Quit.Unbind()
+
 	// Create text input for search
 	ti := textinput.New()
 	ti.Placeholder = "Search files..."
@@ -205,7 +272,15 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 		previewCollapsed: false,
 		aiAgent:          aiAgent,
 		aiEnabled:        aiEnabled,
+		aiOptionsList:    aiOptionsList,
+		aiOptionsItems:   buildAIOptionsItems(),
+		selectedAIOption: 0,
 	}
+
+	// Initialize AI options list
+	m.aiOptionsList.SetItems(m.aiOptionsItems)
+	m.aiOptionsList.SetSize(50, 20) // Set initial size
+	m.aiOptionsList.Select(0)       // Select first item
 
 	m.applyFilter(filterAll)
 
@@ -285,6 +360,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.list.SetSize(msg.Width, msg.Height-4)
+		m.aiOptionsList.SetSize(msg.Width, msg.Height-4)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -322,14 +398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "i":
-				// Open AI chat (Note: 'a' is used for "All" filter)
+				// Open AI options menu
 				if m.aiEnabled && m.aiAgent != nil {
-					m.viewMode = aiChatView
-					m.showAIChat = true
-					// Initialize AI chat if not already done
-					if m.aiChat == nil {
-						m.aiChat = NewAIChat(m.aiAgent, "")
-					}
+					m.previousViewMode = fileListView
+					m.viewMode = aiOptionsView
 					return m, nil
 				} else {
 					// Show message that AI is not available
@@ -441,14 +513,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "i":
-				// Open AI chat from diff view
+				// Open AI options menu from diff view
 				if m.aiEnabled && m.aiAgent != nil {
-					m.viewMode = aiChatView
-					m.showAIChat = true
-					// Initialize AI chat if not already done
-					if m.aiChat == nil {
-						m.aiChat = NewAIChat(m.aiAgent, "")
-					}
+					m.previousViewMode = diffView
+					m.viewMode = aiOptionsView
 					return m, nil
 				} else {
 					// Show message that AI is not available
@@ -514,6 +582,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case aiOptionsView:
+			switch msg.String() {
+			case "esc":
+				// Return to previous view
+				m.viewMode = m.previousViewMode
+				return m, nil
+			case "enter":
+				// Select the current AI option
+				if len(m.aiOptionsList.Items()) > 0 {
+					selectedItem := m.aiOptionsList.SelectedItem()
+					if item, ok := selectedItem.(aiOptionItem); ok {
+						return m, m.executeAIAction(item.action)
+					}
+				}
+				return m, nil
+			case "up", "k":
+				// Navigate up
+				var cmd tea.Cmd
+				m.aiOptionsList, cmd = m.aiOptionsList.Update(msg)
+				return m, cmd
+			case "down", "j":
+				// Navigate down
+				var cmd tea.Cmd
+				m.aiOptionsList, cmd = m.aiOptionsList.Update(msg)
+				return m, cmd
+			default:
+				// Handle other keys in the list
+				var cmd tea.Cmd
+				m.aiOptionsList, cmd = m.aiOptionsList.Update(msg)
+				return m, cmd
+			}
+
 		case aiChatView:
 			switch msg.String() {
 			case "esc":
@@ -521,12 +621,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showAIChat = false
 				return m, nil
 			default:
-				if m.aiChat != nil {
+				if m.aiChatContainer != nil {
 					var cmd tea.Cmd
-					newChat, cmd := m.aiChat.Update(msg)
-					if chatModel, ok := newChat.(*AIChatModel); ok {
-						m.aiChat = chatModel
-					}
+					updatedContainer, cmd := m.aiChatContainer.Update(msg)
+					m.aiChatContainer = updatedContainer.(layout.Container)
 					return m, cmd
 				}
 			}
@@ -562,6 +660,8 @@ func (m model) View() string {
 		return m.renderDiff()
 	case searchMode:
 		return m.renderSearch()
+	case aiOptionsView:
+		return m.renderAIOptions()
 	case aiChatView:
 		return m.renderAIChat()
 	case suggestionsView:
@@ -605,7 +705,7 @@ func (m model) renderFileList() string {
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed"
 		if m.aiEnabled {
-			help += " | i: AI chat"
+			help += " | i: AI options"
 		}
 		help += " | q: quit"
 		b.WriteString(helpStyle.Render(help))
@@ -685,7 +785,7 @@ func (m model) renderFileList() string {
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed"
 	if m.aiEnabled {
-		help += " | i: AI chat"
+		help += " | i: AI options"
 	}
 	help += " | q: quit"
 	b.WriteString(helpStyle.Render(help))
@@ -1073,7 +1173,7 @@ func (m model) renderDiff() string {
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search"
 	if m.aiEnabled {
-		help += " | i: AI chat"
+		help += " | i: AI options"
 	}
 	help += " | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
@@ -1181,10 +1281,10 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 
 // renderAIChat renders the AI chat interface
 func (m model) renderAIChat() string {
-	if m.aiChat == nil {
-		return "AI chat not initialized. Press 'esc' to go back."
+	if m.aiChatContainer == nil {
+		return "AI chat not available. Press 'esc' to go back."
 	}
-	return m.aiChat.View()
+	return m.aiChatContainer.View()
 }
 
 // renderSuggestions renders the AI suggestions view
@@ -1218,6 +1318,119 @@ func (m model) renderSuggestions() string {
 		Render("↑/↓: navigate | Esc: back")
 	b.WriteString("\n")
 	b.WriteString(help)
+
+	return b.String()
+}
+
+// renderAIOptions renders the AI options menu
+func (m model) renderAIOptions() string {
+	var b strings.Builder
+
+	// Title
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Render("AI Options")
+	b.WriteString(title)
+	b.WriteString("\n\n")
+
+	// Show AI options list
+	b.WriteString(m.aiOptionsList.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	help := "↑/↓: navigate | Enter: select | Esc: back"
+	b.WriteString(helpStyle.Render(help))
+
+	return b.String()
+}
+
+// executeAIAction executes the selected AI action and opens chat
+func (m *model) executeAIAction(action aiAction) tea.Cmd {
+	// Get diff content and context
+	diffContent, contextMsg := m.getDiffContentForAI()
+
+	// Convert action to string
+	var actionStr string
+	switch action {
+	case aiActionAnalyze:
+		actionStr = "analyze"
+	case aiActionSuggest:
+		actionStr = "suggest"
+	case aiActionExplain:
+		actionStr = "explain"
+	case aiActionChat:
+		actionStr = "chat"
+	default:
+		actionStr = "explain"
+	}
+
+	// Create AI chat with the specified action
+	m.aiChat = NewAIChatWithAction(m.aiAgent, diffContent, contextMsg, actionStr)
+	m.aiChatContainer = layout.NewContainer(m.aiChat, layout.WithPadding(1, 2, 1, 2))
+
+	// Switch to chat view
+	m.viewMode = aiChatView
+	m.showAIChat = true
+
+	// Initialize container with current size
+	return m.aiChatContainer.SetSize(m.width, m.height)
+}
+
+// getDiffContentForAI determines what diff content to use for AI analysis
+func (m *model) getDiffContentForAI() (string, string) {
+	if m.selectedIdx >= 0 && m.selectedIdx < len(m.files) {
+		// Single file mode
+		file := m.files[m.selectedIdx]
+		diffContent := m.renderFileDiffAsString(file)
+		contextMsg := fmt.Sprintf("Analyzing changes in: %s", file.NewPath)
+		return diffContent, contextMsg
+	}
+	// All files mode
+	diffContent := m.renderAllDiffsAsString()
+	contextMsg := "Analyzing all changes in repository"
+	return diffContent, contextMsg
+}
+
+// renderFileDiffAsString converts a single file diff to string format
+func (m *model) renderFileDiffAsString(file parser.FileDiff) string {
+	var b strings.Builder
+
+	// File header
+	b.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", file.OldPath, file.NewPath))
+	b.WriteString(fmt.Sprintf("--- a/%s\n", file.OldPath))
+	b.WriteString(fmt.Sprintf("+++ b/%s\n", file.NewPath))
+
+	// Render hunks
+	for _, hunk := range file.Hunks {
+		b.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
+			hunk.OldStart, hunk.OldLines, hunk.NewStart, hunk.NewLines))
+
+		for _, line := range hunk.Lines {
+			switch line.Type {
+			case parser.LineDeleted:
+				b.WriteString(fmt.Sprintf("-%s\n", line.Content))
+			case parser.LineAdded:
+				b.WriteString(fmt.Sprintf("+%s\n", line.Content))
+			case parser.LineUnchanged:
+				b.WriteString(fmt.Sprintf(" %s\n", line.Content))
+			}
+		}
+	}
+
+	return b.String()
+}
+
+// renderAllDiffsAsString converts all file diffs to combined string format
+func (m *model) renderAllDiffsAsString() string {
+	var b strings.Builder
+
+	for _, file := range m.files {
+		fileDiff := m.renderFileDiffAsString(file)
+		b.WriteString(fileDiff)
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }
