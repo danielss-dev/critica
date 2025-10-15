@@ -22,6 +22,12 @@ const (
 	DiffStyleFilled  = "filled"
 )
 
+const (
+	AIProviderOpenAI    = "openai"
+	AIProviderAnthropic = "anthropic"
+	AIProviderLocal     = "local"
+)
+
 type Config struct {
 	Interactive      *bool  `json:"interactive,omitempty"`
 	Unified          *bool  `json:"unified,omitempty"`
@@ -30,6 +36,14 @@ type Config struct {
 	DiffStyle        string `json:"diff_style,omitempty"`
 	AddedTextColor   string `json:"added_text_color,omitempty"`
 	DeletedTextColor string `json:"deleted_text_color,omitempty"`
+
+	// AI Configuration
+	AIEnabled       *bool  `json:"ai_enabled,omitempty"`
+	AIProvider      string `json:"ai_provider,omitempty"`
+	AIAPIKey        string `json:"ai_api_key,omitempty"`
+	AIModel         string `json:"ai_model,omitempty"`
+	AutoAnalyze     *bool  `json:"auto_analyze,omitempty"`
+	ShowSuggestions *bool  `json:"show_suggestions,omitempty"`
 }
 
 func Load() (*Config, error) {
@@ -98,6 +112,41 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("invalid deleted_text_color %q: %w", c.DeletedTextColor, err)
 	}
 	c.DeletedTextColor = deleted
+
+	// AI configuration normalization
+	if c.AIProvider != "" {
+		provider := strings.ToLower(strings.TrimSpace(c.AIProvider))
+		switch provider {
+		case AIProviderOpenAI, AIProviderAnthropic, AIProviderLocal:
+			c.AIProvider = provider
+		default:
+			return fmt.Errorf("invalid ai_provider %q", c.AIProvider)
+		}
+	} else {
+		// Default to OpenAI
+		c.AIProvider = AIProviderOpenAI
+	}
+
+	// Set default models based on provider
+	if c.AIModel == "" {
+		switch c.AIProvider {
+		case AIProviderOpenAI:
+			c.AIModel = "gpt-4o-mini"
+		case AIProviderAnthropic:
+			c.AIModel = "claude-3-5-haiku-20241022"
+		}
+	}
+
+	// Check for environment variable overrides
+	if envProvider := os.Getenv("CRITICA_AI_PROVIDER"); envProvider != "" {
+		c.AIProvider = strings.ToLower(envProvider)
+	}
+	if envModel := os.Getenv("CRITICA_AI_MODEL"); envModel != "" {
+		c.AIModel = envModel
+	}
+	if envKey := os.Getenv("CRITICA_AI_API_KEY"); envKey != "" {
+		c.AIAPIKey = envKey
+	}
 
 	return nil
 }

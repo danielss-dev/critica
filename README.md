@@ -7,6 +7,8 @@ A beautiful Git diff viewer for the terminal with split-screen visualization.
 - **Split-screen diff view**: See old and new code side-by-side
 - **Unified diff view**: Traditional unified diff format with `-u` flag
 - **Interactive mode**: Browse files with fuzzy finder, collapse/expand, and keyboard navigation
+- **AI-Powered Code Review**: Analyze, explain, and improve code changes with AI assistance
+- **CI/CD Integration**: Machine-readable reports (JSON/SARIF) for automated code review pipelines
 - **Shows all changes**: Displays modified, new/untracked, deleted, and renamed files
 - **Syntax highlighting**: Automatic language detection and syntax highlighting
 - **Color-coded changes**: Red for deletions, green for additions
@@ -90,6 +92,93 @@ critica internal/ui/renderer.go
 critica --staged
 ```
 
+### AI-Powered Code Review
+
+Critica now includes AI-powered code analysis, suggestions, and explanations.
+
+#### Quick Start
+
+```bash
+# Analyze changes with AI (requires API key)
+export CRITICA_AI_API_KEY="your-api-key"
+critica --ai --analyze
+
+# Get improvement suggestions
+critica --ai --suggest
+
+# Explain what the changes do
+critica --ai --explain
+
+# Use in CI/CD with JSON output
+critica --ai --analyze --ci --format json --output review.json
+
+# Use in CI/CD with SARIF output (for GitHub Code Scanning)
+critica --ai --analyze --ci --format sarif --output critica.sarif
+```
+
+#### AI Providers
+
+Critica supports multiple AI providers:
+
+- **OpenAI** (default): `gpt-4o-mini` model
+- **Anthropic**: `claude-3-5-haiku-20241022` model  
+- **Local**: Mock provider for testing
+
+```bash
+# Use OpenAI (default)
+critica --ai --analyze --provider openai --model gpt-4o-mini
+
+# Use Anthropic Claude
+critica --ai --analyze --provider anthropic --model claude-3-5-haiku-20241022
+
+# Use local mock for testing
+critica --ai --analyze --provider local
+```
+
+#### CI/CD Integration
+
+For automated code review in your CI/CD pipeline:
+
+```bash
+# GitHub Actions example
+critica --ai --analyze --ci --format sarif --output critica.sarif --severity-threshold warning
+
+# Exit codes:
+# 0 = success, no blocking issues
+# 1 = findings at or above severity threshold
+# 2 = runtime/LLM error
+```
+
+Example GitHub Actions workflow:
+
+```yaml
+name: AI Code Review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Install Critica
+        run: go install github.com/danielss-dev/critica@latest
+      
+      - name: AI Code Review
+        env:
+          CRITICA_AI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          critica --ai --analyze --ci --format sarif --output critica.sarif
+      
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: critica.sarif
+```
+
 ### Configuration
 
 Critica loads optional defaults from `~/.config/critica/config.json` (the path provided by `os.UserConfigDir()`). Example:
@@ -102,7 +191,14 @@ Critica loads optional defaults from `~/.config/critica/config.json` (the path p
   "diff_mode": "all",
   "diff_style": "filled",
   "added_text_color": "#8df0b5",
-  "deleted_text_color": "#ff8ba3"
+  "deleted_text_color": "#ff8ba3",
+  
+  "ai_enabled": true,
+  "ai_provider": "openai",
+  "ai_model": "gpt-4o-mini",
+  "ai_api_key": "your-api-key-here",
+  "auto_analyze": false,
+  "show_suggestions": true
 }
 ```
 
@@ -131,6 +227,7 @@ Launch interactive mode with `-i` or `--interactive`:
 - `space` - Collapse/expand current file
 - `tab` - Toggle between split and unified view
 - `/` - Search/filter files (fuzzy finder)
+- `i` - Open AI chat (when AI is enabled)
 - `esc` - Back to file list
 - `q` - Quit
 
@@ -142,6 +239,8 @@ Launch interactive mode with `-i` or `--interactive`:
 
 ## Command-Line Options
 
+### Basic Options
+
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--interactive` | `-i` | Interactive mode with fuzzy finder and collapsible files |
@@ -150,6 +249,22 @@ Launch interactive mode with `-i` or `--interactive`:
 | `--cached` | `-c` | Show only cached changes (same as --staged) |
 | `--no-color` | | Disable color output |
 | `--help` | `-h` | Show help message |
+
+### AI Options
+
+| Flag | Description |
+|------|-------------|
+| `--ai` | Enable AI analysis |
+| `--analyze` | Analyze changes with AI |
+| `--suggest` | Get AI improvement suggestions |
+| `--explain` | Explain changes with AI |
+| `--apply` | Apply AI suggestions (requires permission) |
+| `--format` | Output format: `text`, `md`, `json`, `sarif` (default: `text`) |
+| `--output` | Output file path (default: stdout) |
+| `--severity-threshold` | Severity threshold: `info`, `warning`, `error` (default: `info`) |
+| `--ci` | CI mode (non-interactive, no writes unless --apply) |
+| `--provider` | AI provider: `openai`, `anthropic`, `local` |
+| `--model` | AI model override |
 
 ## How It Works
 

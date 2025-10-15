@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/danielss-dev/critica/internal/ai/agent"
 	"github.com/danielss-dev/critica/internal/parser"
 )
 
@@ -23,6 +24,8 @@ const (
 	fileListView viewMode = iota
 	diffView
 	searchMode
+	aiChatView
+	suggestionsView
 )
 
 type fileFilter int
@@ -52,6 +55,15 @@ type model struct {
 	renderer         *Renderer
 	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
+
+	// AI-related fields
+	aiAgent            agent.Service
+	aiEnabled          bool
+	aiChat             *AIChatModel
+	showAIChat         bool
+	aiSuggestions      []string
+	showSuggestions    bool
+	selectedSuggestion int
 }
 
 type fileItem struct {
@@ -156,7 +168,7 @@ func newCustomDelegate() customDelegate {
 	return d
 }
 
-func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions) error {
+func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions, aiAgent agent.Service, aiEnabled bool) error {
 	delegate := newCustomDelegate()
 	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Changed Files"
@@ -191,6 +203,8 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 		unified:          rendererOpts.Unified,
 		renderer:         NewRenderer(rendererOpts),
 		previewCollapsed: false,
+		aiAgent:          aiAgent,
+		aiEnabled:        aiEnabled,
 	}
 
 	m.applyFilter(filterAll)
@@ -307,6 +321,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setFilter(filterUnstaged)
 				return m, nil
 
+			case "i":
+				// Open AI chat (Note: 'a' is used for "All" filter)
+				if m.aiEnabled && m.aiAgent != nil {
+					m.viewMode = aiChatView
+					m.showAIChat = true
+					// Initialize AI chat if not already done
+					if m.aiChat == nil {
+						m.aiChat = NewAIChat(m.aiAgent, "")
+					}
+					return m, nil
+				} else {
+					// Show message that AI is not available
+					return m, nil
+				}
+
 			case "o", "enter":
 				// Open file in full diff view
 				if len(m.list.Items()) > 0 {
@@ -411,6 +440,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewMode = fileListView
 				return m, nil
 
+			case "i":
+				// Open AI chat from diff view
+				if m.aiEnabled && m.aiAgent != nil {
+					m.viewMode = aiChatView
+					m.showAIChat = true
+					// Initialize AI chat if not already done
+					if m.aiChat == nil {
+						m.aiChat = NewAIChat(m.aiAgent, "")
+					}
+					return m, nil
+				} else {
+					// Show message that AI is not available
+					return m, nil
+				}
+
 			case "tab":
 				m.unified = !m.unified
 				m.renderer.unified = m.unified
@@ -469,6 +513,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+
+		case aiChatView:
+			switch msg.String() {
+			case "esc":
+				m.viewMode = fileListView
+				m.showAIChat = false
+				return m, nil
+			default:
+				if m.aiChat != nil {
+					var cmd tea.Cmd
+					newChat, cmd := m.aiChat.Update(msg)
+					if chatModel, ok := newChat.(*AIChatModel); ok {
+						m.aiChat = chatModel
+					}
+					return m, cmd
+				}
+			}
+
+		case suggestionsView:
+			switch msg.String() {
+			case "esc":
+				m.viewMode = fileListView
+				m.showSuggestions = false
+				return m, nil
+			case "up", "k":
+				if m.selectedSuggestion > 0 {
+					m.selectedSuggestion--
+				}
+				return m, nil
+			case "down", "j":
+				if m.selectedSuggestion < len(m.aiSuggestions)-1 {
+					m.selectedSuggestion++
+				}
+				return m, nil
+			}
 		}
 	}
 
@@ -483,6 +562,10 @@ func (m model) View() string {
 		return m.renderDiff()
 	case searchMode:
 		return m.renderSearch()
+	case aiChatView:
+		return m.renderAIChat()
+	case suggestionsView:
+		return m.renderSuggestions()
 	default:
 		return ""
 	}
@@ -520,7 +603,11 @@ func (m model) renderFileList() string {
 		b.WriteString("\n\n")
 
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed"
+		if m.aiEnabled {
+			help += " | i: AI chat"
+		}
+		help += " | q: quit"
 		b.WriteString(helpStyle.Render(help))
 		return b.String()
 	}
@@ -596,7 +683,11 @@ func (m model) renderFileList() string {
 	// Help text
 	b.WriteString("\n")
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed"
+	if m.aiEnabled {
+		help += " | i: AI chat"
+	}
+	help += " | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -980,7 +1071,11 @@ func (m model) renderDiff() string {
 
 	// Help bar
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search | esc: back | q: quit"
+	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search"
+	if m.aiEnabled {
+		help += " | i: AI chat"
+	}
+	help += " | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1080,6 +1175,49 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 		separator := m.renderer.theme.SeparatorStyle.Render("│")
 		b.WriteString(fmt.Sprintf("%s %s %s\n", leftLine, separator, rightLine))
 	}
+
+	return b.String()
+}
+
+// renderAIChat renders the AI chat interface
+func (m model) renderAIChat() string {
+	if m.aiChat == nil {
+		return "AI chat not initialized. Press 'esc' to go back."
+	}
+	return m.aiChat.View()
+}
+
+// renderSuggestions renders the AI suggestions view
+func (m model) renderSuggestions() string {
+	var b strings.Builder
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Render("AI Suggestions")
+	b.WriteString(title)
+	b.WriteString("\n\n")
+
+	if len(m.aiSuggestions) == 0 {
+		b.WriteString("No suggestions available.\n\n")
+	} else {
+		for i, suggestion := range m.aiSuggestions {
+			style := lipgloss.NewStyle()
+			if i == m.selectedSuggestion {
+				style = style.Border(lipgloss.NormalBorder(), false, false, false, true).
+					BorderForeground(lipgloss.Color("#58a6ff"))
+			}
+
+			b.WriteString(style.Render(fmt.Sprintf("%d. %s", i+1, suggestion)))
+			b.WriteString("\n")
+		}
+	}
+
+	help := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Render("↑/↓: navigate | Esc: back")
+	b.WriteString("\n")
+	b.WriteString(help)
 
 	return b.String()
 }
