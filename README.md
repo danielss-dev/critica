@@ -13,6 +13,13 @@ A beautiful Git diff viewer for the terminal with split-screen visualization.
 - **Line numbers**: Clear line numbering on both sides
 - **Flexible usage**: View diffs for files, directories, or entire repositories
 - **Git integration**: Works with any Git repository
+- **🤖 AI-Powered Analysis**: Get intelligent insights about your code changes
+  - **Code quality analysis**: Comprehensive assessment of code quality
+  - **Improvement suggestions**: Specific, actionable recommendations
+  - **Bug detection**: Identify potential issues and security concerns
+  - **Commit message generation**: AI-generated conventional commit messages
+  - **PR description generation**: Detailed pull request descriptions
+  - **Change explanations**: Clear explanations of what changed and why
 
 ## Installation
 
@@ -59,8 +66,11 @@ critica --cached
 # Disable colors
 critica --no-color
 
+# Enable AI analysis
+critica --ai
+
 # Combine flags
-critica --interactive --unified
+critica --interactive --unified --ai
 ```
 
 ### Examples
@@ -88,6 +98,24 @@ critica internal/ui/renderer.go
 **View staged changes before committing:**
 ```bash
 critica --staged
+```
+
+**AI-Powered Analysis:**
+```bash
+# Comprehensive AI analysis
+critica ai analyze
+
+# Generate commit message
+critica ai commit
+
+# Generate PR description
+critica ai pr
+
+# Get improvement suggestions
+critica ai improve
+
+# Explain code changes
+critica ai explain
 ```
 
 ### Configuration
@@ -121,6 +149,45 @@ If omitted, the built-in theme colors are used. Invalid hex values are ignored d
 
 Command-line flags always override configuration values.
 
+### AI Configuration
+
+Critica supports AI-powered analysis using OpenAI's API. To enable AI features:
+
+1. **Set your OpenAI API key:**
+   ```bash
+   export OPENAI_API_KEY="your-api-key-here"
+   ```
+
+2. **Optional configuration in `~/.config/critica/config.json`:**
+   ```json
+   {
+     "ai_enabled": true,
+     "openai_model": "gpt-4o-mini",
+     "openai_base_url": "https://api.openai.com/v1"
+   }
+   ```
+
+3. **Use AI features:**
+   ```bash
+   # Enable AI in interactive mode
+   critica --ai
+   
+   # Or use AI commands directly
+   critica ai analyze
+   ```
+
+**Available AI Models:**
+- `gpt-4o-mini` (default) - Fast and cost-effective
+- `gpt-4o` - More capable but slower
+- `gpt-3.5-turbo` - Alternative option
+
+**AI Features:**
+- **Analysis**: Comprehensive code quality, security, and performance analysis
+- **Improvements**: Specific suggestions for code enhancement
+- **Commit Messages**: Conventional commit message generation
+- **PR Descriptions**: Detailed pull request descriptions
+- **Explanations**: Clear explanations of code changes
+
 ### Interactive Mode
 
 Launch interactive mode with `-i` or `--interactive`:
@@ -133,6 +200,15 @@ Launch interactive mode with `-i` or `--interactive`:
 - `/` - Search/filter files (fuzzy finder)
 - `esc` - Back to file list
 - `q` - Quit
+
+**AI Keybindings (when `--ai` flag is used):**
+- `1` - AI Analysis - Comprehensive code analysis
+- `2` - AI Commit - Generate commit message
+- `3` - AI PR - Generate PR description
+- `4` - AI Improve - Get improvement suggestions
+- `5` - AI Explain - Explain code changes
+- `r` - Retry AI operation (in AI views)
+- `esc` - Back to file list (in AI views)
 
 **Features:**
 - Fuzzy file search with filtering
@@ -149,7 +225,18 @@ Launch interactive mode with `-i` or `--interactive`:
 | `--staged` | `-s` | Show only staged changes |
 | `--cached` | `-c` | Show only cached changes (same as --staged) |
 | `--no-color` | | Disable color output |
+| `--ai` | | Enable AI analysis and suggestions |
 | `--help` | `-h` | Show help message |
+
+### AI Commands
+
+| Command | Description |
+|---------|-------------|
+| `critica ai analyze [path]` | Perform comprehensive AI analysis of git diff |
+| `critica ai commit [path]` | Generate conventional commit message |
+| `critica ai pr [path]` | Generate PR description |
+| `critica ai improve [path]` | Get code improvement suggestions |
+| `critica ai explain [path]` | Explain code changes |
 
 ## How It Works
 

@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
@@ -10,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/danielss-dev/critica/internal/ai"
 	"github.com/danielss-dev/critica/internal/parser"
 )
 
@@ -23,6 +26,11 @@ const (
 	fileListView viewMode = iota
 	diffView
 	searchMode
+	aiAnalysisView
+	aiCommitView
+	aiPRView
+	aiImproveView
+	aiExplainView
 )
 
 type fileFilter int
@@ -52,6 +60,11 @@ type model struct {
 	renderer         *Renderer
 	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
+	// AI-related fields
+	aiService        *ai.Service
+	aiResult         *ai.AnalysisResult
+	aiLoading        bool
+	aiError          string
 }
 
 type fileItem struct {
@@ -156,7 +169,7 @@ func newCustomDelegate() customDelegate {
 	return d
 }
 
-func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions) error {
+func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions, aiService *ai.Service) error {
 	delegate := newCustomDelegate()
 	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Changed Files"
@@ -186,6 +199,7 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 		textInput:        ti,
 		viewMode:         fileListView,
 		selectedIdx:      -1,
+		aiService:        aiService,
 		filterMode:       filterAll,
 		useColor:         rendererOpts.UseColor,
 		unified:          rendererOpts.Unified,
@@ -325,6 +339,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "tab":
 				m.unified = !m.unified
 				m.renderer.unified = m.unified
+				return m, nil
+
+			case "1":
+				// AI Analysis
+				if m.aiService != nil {
+					m.viewMode = aiAnalysisView
+					m.aiLoading = true
+					m.aiError = ""
+					return m, m.performAIAnalysis()
+				}
+				return m, nil
+
+			case "2":
+				// AI Commit Message
+				if m.aiService != nil {
+					m.viewMode = aiCommitView
+					m.aiLoading = true
+					m.aiError = ""
+					return m, m.generateCommitMessage()
+				}
+				return m, nil
+
+			case "3":
+				// AI PR Description
+				if m.aiService != nil {
+					m.viewMode = aiPRView
+					m.aiLoading = true
+					m.aiError = ""
+					return m, m.generatePRDescription()
+				}
+				return m, nil
+
+			case "4":
+				// AI Improvements
+				if m.aiService != nil {
+					m.viewMode = aiImproveView
+					m.aiLoading = true
+					m.aiError = ""
+					return m, m.suggestImprovements()
+				}
+				return m, nil
+
+			case "5":
+				// AI Explain
+				if m.aiService != nil {
+					m.viewMode = aiExplainView
+					m.aiLoading = true
+					m.aiError = ""
+					return m, m.explainChanges()
+				}
 				return m, nil
 
 			default:
@@ -469,7 +533,90 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+
+		case aiAnalysisView, aiCommitView, aiPRView, aiImproveView, aiExplainView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc", "backspace":
+				m.viewMode = fileListView
+				m.aiLoading = false
+				m.aiError = ""
+				return m, nil
+
+			case "r":
+				// Retry AI operation
+				if m.aiService != nil {
+					m.aiLoading = true
+					m.aiError = ""
+					switch m.viewMode {
+					case aiAnalysisView:
+						return m, m.performAIAnalysis()
+					case aiCommitView:
+						return m, m.generateCommitMessage()
+					case aiPRView:
+						return m, m.generatePRDescription()
+					case aiImproveView:
+						return m, m.suggestImprovements()
+					case aiExplainView:
+						return m, m.explainChanges()
+					}
+				}
+				return m, nil
+			}
 		}
+
+	// Handle AI messages
+	case aiAnalysisResultMsg:
+		m.aiLoading = false
+		m.aiResult = msg.result
+		return m, nil
+
+	case aiAnalysisErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiCommitResultMsg:
+		m.aiLoading = false
+		// Store commit message in a field for rendering
+		return m, nil
+
+	case aiCommitErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiPRResultMsg:
+		m.aiLoading = false
+		// Store PR description in a field for rendering
+		return m, nil
+
+	case aiPRErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiImproveResultMsg:
+		m.aiLoading = false
+		// Store improvements in a field for rendering
+		return m, nil
+
+	case aiImproveErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiExplainResultMsg:
+		m.aiLoading = false
+		// Store explanation in a field for rendering
+		return m, nil
+
+	case aiExplainErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
 	}
 
 	return m, nil
@@ -483,6 +630,16 @@ func (m model) View() string {
 		return m.renderDiff()
 	case searchMode:
 		return m.renderSearch()
+	case aiAnalysisView:
+		return m.renderAIAnalysis()
+	case aiCommitView:
+		return m.renderAICommit()
+	case aiPRView:
+		return m.renderAIPR()
+	case aiImproveView:
+		return m.renderAIImprove()
+	case aiExplainView:
+		return m.renderAIExplain()
 	default:
 		return ""
 	}
@@ -520,7 +677,7 @@ func (m model) renderFileList() string {
 		b.WriteString("\n\n")
 
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | 1: AI analyze | 2: AI commit | 3: AI PR | 4: AI improve | 5: AI explain | q: quit"
 		b.WriteString(helpStyle.Render(help))
 		return b.String()
 	}
@@ -596,7 +753,7 @@ func (m model) renderFileList() string {
 	// Help text
 	b.WriteString("\n")
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | 1: AI analyze | 2: AI commit | 3: AI PR | 4: AI improve | 5: AI explain | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1080,6 +1237,460 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 		separator := m.renderer.theme.SeparatorStyle.Render("│")
 		b.WriteString(fmt.Sprintf("%s %s %s\n", leftLine, separator, rightLine))
 	}
+
+	return b.String()
+}
+
+// AI Command Functions
+
+func (m *model) performAIAnalysis() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		result, err := m.aiService.AnalyzeDiff(ctx, m.files)
+		if err != nil {
+			return aiAnalysisErrorMsg{err.Error()}
+		}
+		return aiAnalysisResultMsg{result}
+	}
+}
+
+func (m *model) generateCommitMessage() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, m.files)
+		if err != nil {
+			return aiCommitErrorMsg{err.Error()}
+		}
+		return aiCommitResultMsg{commitMsg}
+	}
+}
+
+func (m *model) generatePRDescription() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		prDesc, err := m.aiService.GeneratePRDescription(ctx, m.files)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+		return aiPRResultMsg{prDesc}
+	}
+}
+
+func (m *model) suggestImprovements() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		improvements, err := m.aiService.SuggestImprovements(ctx, m.files)
+		if err != nil {
+			return aiImproveErrorMsg{err.Error()}
+		}
+		return aiImproveResultMsg{improvements}
+	}
+}
+
+func (m *model) explainChanges() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		explanation, err := m.aiService.ExplainChanges(ctx, m.files)
+		if err != nil {
+			return aiExplainErrorMsg{err.Error()}
+		}
+		return aiExplainResultMsg{explanation}
+	}
+}
+
+// AI Message Types
+
+type aiAnalysisResultMsg struct {
+	result *ai.AnalysisResult
+}
+
+type aiAnalysisErrorMsg struct {
+	err string
+}
+
+type aiCommitResultMsg struct {
+	commitMsg string
+}
+
+type aiCommitErrorMsg struct {
+	err string
+}
+
+type aiPRResultMsg struct {
+	prDesc string
+}
+
+type aiPRErrorMsg struct {
+	err string
+}
+
+type aiImproveResultMsg struct {
+	improvements []string
+}
+
+type aiImproveErrorMsg struct {
+	err string
+}
+
+type aiExplainResultMsg struct {
+	explanation string
+}
+
+type aiExplainErrorMsg struct {
+	err string
+}
+
+// AI Render Functions
+
+func (m model) renderAIAnalysis() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Analysis Results"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Analyzing changes with AI..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	if m.aiResult == nil {
+		return b.String()
+	}
+
+	// Summary
+	if m.aiResult.Summary != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📝 Summary:"))
+		b.WriteString("\n")
+		b.WriteString(m.aiResult.Summary)
+		b.WriteString("\n\n")
+	}
+
+	// Code Quality
+	if m.aiResult.CodeQuality != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("🏆 Code Quality:"))
+		b.WriteString("\n")
+		b.WriteString(m.aiResult.CodeQuality)
+		b.WriteString("\n\n")
+	}
+
+	// Issues
+	if len(m.aiResult.Issues) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("⚠️  Issues Found:"))
+		b.WriteString("\n")
+		for i, issue := range m.aiResult.Issues {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, issue))
+		}
+		b.WriteString("\n")
+	}
+
+	// Improvements
+	if len(m.aiResult.Improvements) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("💡 Improvement Suggestions:"))
+		b.WriteString("\n")
+		for i, improvement := range m.aiResult.Improvements {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, improvement))
+		}
+		b.WriteString("\n")
+	}
+
+	// Security Notes
+	if len(m.aiResult.SecurityNotes) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("🔒 Security Notes:"))
+		b.WriteString("\n")
+		for i, note := range m.aiResult.SecurityNotes {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, note))
+		}
+		b.WriteString("\n")
+	}
+
+	// Performance Notes
+	if len(m.aiResult.PerformanceNotes) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("⚡ Performance Notes:"))
+		b.WriteString("\n")
+		for i, note := range m.aiResult.PerformanceNotes {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, note))
+		}
+		b.WriteString("\n")
+	}
+
+	// Commit Message
+	if m.aiResult.CommitMessage != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📝 Suggested Commit Message:"))
+		b.WriteString("\n")
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(0, 0, 1, 0)
+		b.WriteString(codeStyle.Render(m.aiResult.CommitMessage))
+		b.WriteString("\n")
+	}
+
+	// PR Description
+	if m.aiResult.PRDescription != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📋 PR Description:"))
+		b.WriteString("\n")
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(0, 0, 1, 0)
+		b.WriteString(codeStyle.Render(m.aiResult.PRDescription))
+		b.WriteString("\n")
+	}
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+
+	return b.String()
+}
+
+func (m model) renderAICommit() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Commit Message"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Generating commit message..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// This would be populated by the AI commit result
+	// For now, show a placeholder
+	codeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#21262d")).
+		Padding(1).
+		Margin(1, 0)
+	b.WriteString(codeStyle.Render("Generated commit message will appear here"))
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+
+	return b.String()
+}
+
+func (m model) renderAIPR() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI PR Description"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Generating PR description..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// This would be populated by the AI PR result
+	// For now, show a placeholder
+	codeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#21262d")).
+		Padding(1).
+		Margin(1, 0)
+	b.WriteString(codeStyle.Render("Generated PR description will appear here"))
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+
+	return b.String()
+}
+
+func (m model) renderAIImprove() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Improvement Suggestions"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Analyzing for improvements..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// This would be populated by the AI improve result
+	// For now, show a placeholder
+	codeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#21262d")).
+		Padding(1).
+		Margin(1, 0)
+	b.WriteString(codeStyle.Render("Improvement suggestions will appear here"))
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+
+	return b.String()
+}
+
+func (m model) renderAIExplain() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Change Explanation"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Explaining changes..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// This would be populated by the AI explain result
+	// For now, show a placeholder
+	codeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#21262d")).
+		Padding(1).
+		Margin(1, 0)
+	b.WriteString(codeStyle.Render("Change explanation will appear here"))
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
 
 	return b.String()
 }
