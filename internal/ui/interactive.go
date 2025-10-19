@@ -9,10 +9,12 @@ import (
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/danielss-dev/critica/internal/ai"
+	"github.com/danielss-dev/critica/internal/git"
 	"github.com/danielss-dev/critica/internal/parser"
 )
 
@@ -29,6 +31,8 @@ const (
 	aiMenuView
 	aiAnalysisView
 	aiCommitView
+	aiCommitScopeView
+	aiCommitEditView
 	aiPRView
 	aiImproveView
 	aiExplainView
@@ -50,6 +54,7 @@ type model struct {
 	fileItems        []list.Item
 	list             list.Model
 	textInput        textinput.Model
+	textarea         textarea.Model
 	viewMode         viewMode
 	previousViewMode viewMode // Track previous view for AI menu navigation
 	selectedIdx      int
@@ -71,6 +76,11 @@ type model struct {
 	aiPRDesc       string
 	aiImprovements []string
 	aiExplanation  string
+	// Commit workflow fields
+	commitScope           string // "staged" or "all"
+	commitMessageEditable bool
+	commitApplied         bool
+	commitError           string
 }
 
 type fileItem struct {
@@ -132,27 +142,27 @@ func buildAIMenuItems() []list.Item {
 	items := []list.Item{
 		aiMenuItem{
 			title:       "AI Analysis",
-			description: "Analyze code changes for quality, issues, and improvements",
+			description: "Analyze code changes for quality, issues, and improvements (a)",
 			viewMode:    aiAnalysisView,
 		},
 		aiMenuItem{
 			title:       "AI Commit Message",
-			description: "Generate a commit message based on changes",
+			description: "Generate a commit message based on changes (c)",
 			viewMode:    aiCommitView,
 		},
 		aiMenuItem{
 			title:       "AI PR Description",
-			description: "Generate a pull request description",
+			description: "Generate a pull request description (p)",
 			viewMode:    aiPRView,
 		},
 		aiMenuItem{
 			title:       "AI Improvements",
-			description: "Get suggestions for code improvements",
+			description: "Get suggestions for code improvements (i)",
 			viewMode:    aiImproveView,
 		},
 		aiMenuItem{
 			title:       "AI Explain Changes",
-			description: "Get an explanation of what changed",
+			description: "Get an explanation of what changed (e)",
 			viewMode:    aiExplainView,
 		},
 	}
@@ -238,12 +248,19 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 	ti.Placeholder = "Search files..."
 	ti.CharLimit = 50
 
+	// Create textarea for commit message editing
+	ta := textarea.New()
+	ta.Placeholder = "Enter commit message..."
+	ta.CharLimit = 500
+	ta.SetHeight(10)
+
 	m := model{
 		allFiles:         allFiles,
 		stagedFiles:      stagedFiles,
 		unstagedFiles:    unstagedFiles,
 		list:             l,
 		textInput:        ti,
+		textarea:         ta,
 		viewMode:         fileListView,
 		selectedIdx:      -1,
 		aiService:        aiService,
@@ -446,6 +463,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateListTitle()
 				return m, nil
 
+			case "c":
+				// Shortcut for commit
+				if m.aiService != nil {
+					m.viewMode = aiCommitScopeView
+					m.aiLoading = false
+					m.aiError = ""
+					m.scrollOffset = 0
+				}
+				return m, nil
+
+			case "a":
+				// Shortcut for analysis
+				if m.aiService != nil {
+					m.viewMode = aiAnalysisView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.performAIAnalysis()
+				}
+				return m, nil
+
+			case "p":
+				// Shortcut for PR description
+				if m.aiService != nil {
+					m.viewMode = aiPRView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.generatePRDescription()
+				}
+				return m, nil
+
+			case "i":
+				// Shortcut for improvements
+				if m.aiService != nil {
+					m.viewMode = aiImproveView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.suggestImprovements()
+				}
+				return m, nil
+
+			case "e":
+				// Shortcut for explain
+				if m.aiService != nil {
+					m.viewMode = aiExplainView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.explainChanges()
+				}
+				return m, nil
+
 			case "enter":
 				// Select AI function
 				if len(m.list.Items()) > 0 {
@@ -461,7 +532,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								case aiAnalysisView:
 									return m, m.performAIAnalysis()
 								case aiCommitView:
-									return m, m.generateCommitMessage()
+									m.viewMode = aiCommitScopeView
+									return m, nil
 								case aiPRView:
 									return m, m.generatePRDescription()
 								case aiImproveView:
@@ -574,15 +646,71 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		case aiAnalysisView, aiCommitView, aiPRView, aiImproveView, aiExplainView:
+		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiCommitEditView, aiPRView, aiImproveView, aiExplainView:
 			switch msg.String() {
 			case "q", "ctrl+c":
 				return m, tea.Quit
 
 			case "esc", "backspace":
+				if m.viewMode == aiCommitScopeView {
+					m.viewMode = aiMenuView
+					return m, nil
+				} else if m.viewMode == aiCommitEditView {
+					m.viewMode = aiCommitView
+					return m, nil
+				}
 				m.viewMode = fileListView
 				m.aiLoading = false
 				m.aiError = ""
+				return m, nil
+
+			case "1":
+				// Select staged files only
+				if m.viewMode == aiCommitScopeView {
+					m.commitScope = "staged"
+					m.viewMode = aiCommitView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.generateCommitMessage()
+				}
+				return m, nil
+
+			case "2":
+				// Select all files (git add .)
+				if m.viewMode == aiCommitScopeView {
+					m.commitScope = "all"
+					m.viewMode = aiCommitView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.generateCommitMessage()
+				}
+				return m, nil
+
+			case "a":
+				// Apply commit
+				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
+					return m, m.applyCommit()
+				}
+				return m, nil
+
+			case "e":
+				// Edit commit message
+				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
+					m.textarea.SetValue(m.aiCommitMsg)
+					m.viewMode = aiCommitEditView
+					return m, nil
+				}
+				return m, nil
+
+			case "ctrl+s":
+				// Save edited commit message
+				if m.viewMode == aiCommitEditView {
+					m.aiCommitMsg = m.textarea.Value()
+					m.viewMode = aiCommitView
+					return m, nil
+				}
 				return m, nil
 
 			case "r":
@@ -639,6 +767,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollOffset = 999999
 				return m, nil
 			}
+
+		// Handle textarea updates for commit edit view
+		default:
+			if m.viewMode == aiCommitEditView {
+				var cmd tea.Cmd
+				m.textarea, cmd = m.textarea.Update(msg)
+				return m, cmd
+			}
 		}
 
 	// Handle AI messages
@@ -691,6 +827,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.aiLoading = false
 		m.aiError = msg.err
 		return m, nil
+
+	case commitAppliedMsg:
+		m.commitApplied = true
+		m.commitError = ""
+		return m, nil
+
+	case commitErrorMsg:
+		m.commitApplied = false
+		m.commitError = msg.err
+		return m, nil
 	}
 
 	return m, nil
@@ -710,6 +856,10 @@ func (m model) View() string {
 		return m.renderAIAnalysis()
 	case aiCommitView:
 		return m.renderAICommit()
+	case aiCommitScopeView:
+		return m.renderAICommitScope()
+	case aiCommitEditView:
+		return m.renderAICommitEdit()
 	case aiPRView:
 		return m.renderAIPR()
 	case aiImproveView:
@@ -1100,7 +1250,7 @@ func (m model) renderAIMenu() string {
 
 	// Help text
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "j/k: navigate | enter: select | esc: back | q: quit"
+	help := "j/k: navigate | enter: select | c/a/p/i/e: shortcuts | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1352,7 +1502,15 @@ func (m *model) generateCommitMessage() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, m.files)
+		// Use the appropriate files based on scope
+		var filesToUse []parser.FileDiff
+		if m.commitScope == "staged" {
+			filesToUse = m.stagedFiles
+		} else {
+			filesToUse = m.files // All files
+		}
+
+		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, filesToUse)
 		if err != nil {
 			return aiCommitErrorMsg{err.Error()}
 		}
@@ -1399,6 +1557,26 @@ func (m *model) explainChanges() tea.Cmd {
 	}
 }
 
+func (m *model) applyCommit() tea.Cmd {
+	return func() tea.Msg {
+		// First, stage all files if scope is "all"
+		if m.commitScope == "all" {
+			err := git.StageAllFiles(".")
+			if err != nil {
+				return commitErrorMsg{err.Error()}
+			}
+		}
+
+		// Create the commit
+		err := git.CreateCommit(".", m.aiCommitMsg)
+		if err != nil {
+			return commitErrorMsg{err.Error()}
+		}
+
+		return commitAppliedMsg{success: true, message: "Commit created successfully"}
+	}
+}
+
 // AI Message Types
 
 type aiAnalysisResultMsg struct {
@@ -1438,6 +1616,19 @@ type aiExplainResultMsg struct {
 }
 
 type aiExplainErrorMsg struct {
+	err string
+}
+
+type commitScopeSelectedMsg struct {
+	scope string
+}
+
+type commitAppliedMsg struct {
+	success bool
+	message string
+}
+
+type commitErrorMsg struct {
 	err string
 }
 
@@ -1681,6 +1872,33 @@ func (m model) renderAICommit() string {
 			Padding(1).
 			Margin(1, 0)
 		b.WriteString(codeStyle.Render(m.aiCommitMsg))
+		b.WriteString("\n\n")
+
+		// Show commit status
+		if m.commitApplied {
+			successStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3fb950")).
+				Bold(true)
+			b.WriteString(successStyle.Render("✅ Commit applied successfully!"))
+			b.WriteString("\n\n")
+		} else if m.commitError != "" {
+			errorStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f85149")).
+				Bold(true)
+			b.WriteString(errorStyle.Render("❌ Error: " + m.commitError))
+			b.WriteString("\n\n")
+		} else {
+			// Show action options
+			actionStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f0f6fc")).
+				Bold(true)
+			b.WriteString(actionStyle.Render("Actions:"))
+			b.WriteString("\n")
+			b.WriteString("  a: Apply commit\n")
+			b.WriteString("  r: Retry (regenerate message)\n")
+			b.WriteString("  e: Edit message manually\n")
+			b.WriteString("\n")
+		}
 	} else {
 		codeStyle := lipgloss.NewStyle().
 			Background(lipgloss.Color("#21262d")).
@@ -2039,4 +2257,71 @@ func (m model) renderAIExplain() string {
 	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
 	return result
+}
+func (m model) renderAICommitScope() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Commit Message - Select Scope"))
+	b.WriteString("\n\n")
+
+	// Show options
+	optionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Margin(0, 0, 1, 0)
+
+	b.WriteString(optionStyle.Render("Choose which files to include in the commit:"))
+	b.WriteString("\n\n")
+
+	// Option 1: Staged files only
+	option1Style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#58a6ff")).
+		Bold(true)
+	b.WriteString(option1Style.Render("1. Staged files only"))
+	b.WriteString("\n")
+	b.WriteString("   Use currently staged files for commit message generation\n\n")
+
+	// Option 2: All files
+	option2Style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#58a6ff")).
+		Bold(true)
+	b.WriteString(option2Style.Render("2. All files (git add .)"))
+	b.WriteString("\n")
+	b.WriteString("   Stage all files and generate commit message\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press 1 or 2 to select, or esc to go back"))
+
+	return b.String()
+}
+
+func (m model) renderAICommitEdit() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 Edit Commit Message"))
+	b.WriteString("\n\n")
+
+	// Show the textarea
+	b.WriteString(m.textarea.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("ctrl+s: save | esc: cancel"))
+
+	return b.String()
 }
