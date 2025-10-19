@@ -22,7 +22,6 @@ type Config struct {
 	APIKey              string
 	Model               string
 	MaxCompletionTokens int
-	Temperature         float32
 	BaseURL             string
 }
 
@@ -58,9 +57,8 @@ func NewService(config *Config) *Service {
 func LoadConfig() *Config {
 	config := &Config{
 		APIKey:              os.Getenv("OPENAI_API_KEY"),
-		Model:               getEnvOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
+		Model:               getEnvOrDefault("OPENAI_MODEL", "gpt-5-nano-2025-08-07"),
 		MaxCompletionTokens: 4000,
-		Temperature:         0.3,
 		BaseURL:             os.Getenv("OPENAI_BASE_URL"),
 	}
 
@@ -318,7 +316,6 @@ func (s *Service) callAI(ctx context.Context, prompt string) (string, error) {
 			},
 		},
 		MaxCompletionTokens: s.config.MaxCompletionTokens,
-		Temperature:         s.config.Temperature,
 	}
 
 	resp, err := s.client.CreateChatCompletion(ctx, req)
