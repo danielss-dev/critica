@@ -192,6 +192,45 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 	fmt.Println("─" + strings.Repeat("─", len(commitMsg)))
 	fmt.Println(commitMsg)
 	fmt.Println("─" + strings.Repeat("─", len(commitMsg)))
+	fmt.Println()
+
+	// Ask for confirmation to apply commit
+	fmt.Print("Do you want to apply this commit? (y/N): ")
+	var applyResponse string
+	fmt.Scanln(&applyResponse)
+
+	if applyResponse != "y" && applyResponse != "Y" && applyResponse != "yes" {
+		fmt.Println("Commit cancelled.")
+		return nil
+	}
+
+	// Apply the commit
+	fmt.Println("Applying commit...")
+	err = git.CreateCommit(path, commitMsg)
+	if err != nil {
+		return fmt.Errorf("failed to create commit: %w", err)
+	}
+	fmt.Println("✅ Commit applied successfully!")
+	fmt.Println()
+
+	// Ask for confirmation to push
+	fmt.Print("Do you want to push the branch? (y/N): ")
+	var pushResponse string
+	fmt.Scanln(&pushResponse)
+
+	if pushResponse != "y" && pushResponse != "Y" && pushResponse != "yes" {
+		fmt.Println("Push cancelled.")
+		return nil
+	}
+
+	// Push the branch
+	fmt.Println("Pushing branch...")
+	err = git.PushBranch(path)
+	if err != nil {
+		return fmt.Errorf("failed to push branch: %w", err)
+	}
+	fmt.Println("✅ Branch pushed successfully!")
+
 	return nil
 }
 
