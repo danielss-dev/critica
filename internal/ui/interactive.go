@@ -26,6 +26,7 @@ const (
 	fileListView viewMode = iota
 	diffView
 	searchMode
+	aiMenuView
 	aiAnalysisView
 	aiCommitView
 	aiPRView
@@ -50,6 +51,7 @@ type model struct {
 	list             list.Model
 	textInput        textinput.Model
 	viewMode         viewMode
+	previousViewMode viewMode // Track previous view for AI menu navigation
 	selectedIdx      int
 	collapsed        map[int]bool
 	filterMode       fileFilter
@@ -82,6 +84,16 @@ func (f fileItem) FilterValue() string { return f.fullPath }
 func (f fileItem) Title() string       { return f.displayName }
 func (f fileItem) Description() string { return f.status }
 
+type aiMenuItem struct {
+	title       string
+	description string
+	viewMode    viewMode
+}
+
+func (a aiMenuItem) FilterValue() string { return a.title }
+func (a aiMenuItem) Title() string       { return a.title }
+func (a aiMenuItem) Description() string { return a.description }
+
 func filterDisplayName(filter fileFilter) string {
 	switch filter {
 	case filterStaged:
@@ -112,6 +124,37 @@ func buildFileItems(files []parser.FileDiff) []list.Item {
 			status:      status,
 			index:       i,
 		}
+	}
+	return items
+}
+
+func buildAIMenuItems() []list.Item {
+	items := []list.Item{
+		aiMenuItem{
+			title:       "AI Analysis",
+			description: "Analyze code changes for quality, issues, and improvements",
+			viewMode:    aiAnalysisView,
+		},
+		aiMenuItem{
+			title:       "AI Commit Message",
+			description: "Generate a commit message based on changes",
+			viewMode:    aiCommitView,
+		},
+		aiMenuItem{
+			title:       "AI PR Description",
+			description: "Generate a pull request description",
+			viewMode:    aiPRView,
+		},
+		aiMenuItem{
+			title:       "AI Improvements",
+			description: "Get suggestions for code improvements",
+			viewMode:    aiImproveView,
+		},
+		aiMenuItem{
+			title:       "AI Explain Changes",
+			description: "Get an explanation of what changed",
+			viewMode:    aiExplainView,
+		},
 	}
 	return items
 }
@@ -314,15 +357,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "a":
-				m.setFilter(filterAll)
-				return m, nil
-
-			case "s":
-				m.setFilter(filterStaged)
-				return m, nil
-
-			case "c":
-				m.setFilter(filterUnstaged)
+				m.previousViewMode = fileListView
+				m.viewMode = aiMenuView
+				aiMenuItems := buildAIMenuItems()
+				m.list.SetItems(aiMenuItems)
+				m.list.Title = "AI Functions"
 				return m, nil
 
 			case "o", "enter":
@@ -343,61 +382,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "tab":
 				m.unified = !m.unified
 				m.renderer.unified = m.unified
-				return m, nil
-
-			case "1":
-				// AI Analysis
-				if m.aiService != nil {
-					m.viewMode = aiAnalysisView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0 // Reset scroll when entering AI view
-					return m, m.performAIAnalysis()
-				}
-				return m, nil
-
-			case "2":
-				// AI Commit Message
-				if m.aiService != nil {
-					m.viewMode = aiCommitView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0 // Reset scroll when entering AI view
-					return m, m.generateCommitMessage()
-				}
-				return m, nil
-
-			case "3":
-				// AI PR Description
-				if m.aiService != nil {
-					m.viewMode = aiPRView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0 // Reset scroll when entering AI view
-					return m, m.generatePRDescription()
-				}
-				return m, nil
-
-			case "4":
-				// AI Improvements
-				if m.aiService != nil {
-					m.viewMode = aiImproveView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0 // Reset scroll when entering AI view
-					return m, m.suggestImprovements()
-				}
-				return m, nil
-
-			case "5":
-				// AI Explain
-				if m.aiService != nil {
-					m.viewMode = aiExplainView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0 // Reset scroll when entering AI view
-					return m, m.explainChanges()
-				}
 				return m, nil
 
 			default:
@@ -449,6 +433,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 
+		case aiMenuView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc", "backspace":
+				// Return to previous view
+				m.viewMode = m.previousViewMode
+				// Restore file list items
+				m.list.SetItems(m.fileItems)
+				m.updateListTitle()
+				return m, nil
+
+			case "enter":
+				// Select AI function
+				if len(m.list.Items()) > 0 {
+					selectedItem := m.list.SelectedItem()
+					if selectedItem != nil {
+						if item, ok := selectedItem.(aiMenuItem); ok {
+							if m.aiService != nil {
+								m.viewMode = item.viewMode
+								m.aiLoading = true
+								m.aiError = ""
+								m.scrollOffset = 0
+								switch item.viewMode {
+								case aiAnalysisView:
+									return m, m.performAIAnalysis()
+								case aiCommitView:
+									return m, m.generateCommitMessage()
+								case aiPRView:
+									return m, m.generatePRDescription()
+								case aiImproveView:
+									return m, m.suggestImprovements()
+								case aiExplainView:
+									return m, m.explainChanges()
+								}
+							}
+						}
+					}
+				}
+				return m, nil
+
+			case "j", "k", "up", "down":
+				// Navigate AI menu
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+
+			default:
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+			}
+
 		case diffView:
 			switch msg.String() {
 			case "q", "ctrl+c":
@@ -470,18 +508,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "a":
-				m.setFilter(filterAll)
-				m.viewMode = fileListView
-				return m, nil
-
-			case "s":
-				m.setFilter(filterStaged)
-				m.viewMode = fileListView
-				return m, nil
-
-			case "c":
-				m.setFilter(filterUnstaged)
-				m.viewMode = fileListView
+				m.previousViewMode = diffView
+				m.viewMode = aiMenuView
+				aiMenuItems := buildAIMenuItems()
+				m.list.SetItems(aiMenuItems)
+				m.list.Title = "AI Functions"
 				return m, nil
 
 			case "tab":
@@ -673,6 +704,8 @@ func (m model) View() string {
 		return m.renderDiff()
 	case searchMode:
 		return m.renderSearch()
+	case aiMenuView:
+		return m.renderAIMenu()
 	case aiAnalysisView:
 		return m.renderAIAnalysis()
 	case aiCommitView:
@@ -720,7 +753,7 @@ func (m model) renderFileList() string {
 		b.WriteString("\n\n")
 
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | 1: AI analyze | 2: AI commit | 3: AI PR | 4: AI improve | 5: AI explain | q: quit"
+		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: AI menu | q: quit"
 		b.WriteString(helpStyle.Render(help))
 		return b.String()
 	}
@@ -796,7 +829,7 @@ func (m model) renderFileList() string {
 	// Help text
 	b.WriteString("\n")
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | 1: AI analyze | 2: AI commit | 3: AI PR | 4: AI improve | 5: AI explain | q: quit"
+	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: AI menu | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1058,6 +1091,21 @@ func (m model) renderSearch() string {
 	return b.String()
 }
 
+func (m model) renderAIMenu() string {
+	var b strings.Builder
+
+	// Show AI menu list
+	b.WriteString(m.list.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	help := "j/k: navigate | enter: select | esc: back | q: quit"
+	b.WriteString(helpStyle.Render(help))
+
+	return b.String()
+}
+
 func (m model) renderDiff() string {
 	if m.selectedIdx < 0 || m.selectedIdx >= len(m.files) {
 		return "No file selected"
@@ -1180,7 +1228,7 @@ func (m model) renderDiff() string {
 
 	// Help bar
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search | esc: back | q: quit"
+	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f: cycle filter | a: AI menu | /: search | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
