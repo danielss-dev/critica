@@ -149,10 +149,44 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not a git repository: %s", path)
 	}
 
-	// Get the diff
-	diffOutput, err := git.GetDiff(path, staged)
+	// Check if there are staged changes
+	hasStaged, err := git.HasStagedChanges(path)
 	if err != nil {
-		return fmt.Errorf("failed to get diff: %w", err)
+		return fmt.Errorf("failed to check staged changes: %w", err)
+	}
+
+	var diffOutput string
+	if hasStaged {
+		// Get staged diff
+		diffOutput, err = git.GetDiff(path, staged)
+		if err != nil {
+			return fmt.Errorf("failed to get staged diff: %w", err)
+		}
+	} else {
+		// Check if there are unstaged changes
+		unstagedDiff, err := git.GetDiffForMode(path, git.DiffModeUnstaged)
+		if err != nil {
+			return fmt.Errorf("failed to get unstaged diff: %w", err)
+		}
+
+		if unstagedDiff == "" {
+			fmt.Println("No changes to commit")
+			return nil
+		}
+
+		// Stage all files automatically
+		fmt.Println("No staged changes found. Staging all modified files...")
+		err = git.StageAllFiles(path)
+		if err != nil {
+			return fmt.Errorf("failed to stage files: %w", err)
+		}
+		fmt.Println("✅ Files staged successfully!")
+
+		// Get the staged diff after staging
+		diffOutput, err = git.GetDiff(path, staged)
+		if err != nil {
+			return fmt.Errorf("failed to get staged diff after staging: %w", err)
+		}
 	}
 
 	if diffOutput == "" {
@@ -189,9 +223,8 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Generated commit message:")
-	fmt.Println("─" + strings.Repeat("─", len(commitMsg)))
+	fmt.Println()
 	fmt.Println(commitMsg)
-	fmt.Println("─" + strings.Repeat("─", len(commitMsg)))
 	fmt.Println()
 
 	// Ask for confirmation to apply commit
