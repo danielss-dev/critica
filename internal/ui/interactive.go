@@ -83,6 +83,7 @@ type model struct {
 	commitError           string
 	commitPushed          bool
 	pushError             string
+	commitCompleted       bool
 }
 
 type fileItem struct {
@@ -697,10 +698,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
-			case "p":
-				// Push branch
+			case "y":
+				// Push branch (Yes)
 				if m.viewMode == aiCommitView && m.commitApplied {
 					return m, m.pushBranch()
+				}
+				return m, nil
+
+			case "n":
+				// Don't push (No) - show completion message
+				if m.viewMode == aiCommitView && m.commitApplied {
+					m.commitCompleted = true
+					return m, nil
 				}
 				return m, nil
 
@@ -1935,17 +1944,27 @@ func (m model) renderAICommit() string {
 					Bold(true)
 				b.WriteString(pushErrorStyle.Render("❌ Push Error: " + m.pushError))
 				b.WriteString("\n\n")
+			} else if m.commitCompleted {
+				completionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#3fb950")).
+					Bold(true)
+				b.WriteString(completionStyle.Render("✅ Commit workflow completed!"))
+				b.WriteString("\n\n")
 			} else {
-				// Show push action
-				actionStyle := lipgloss.NewStyle().
+				// Show simple push prompt
+				questionStyle := lipgloss.NewStyle().
 					Foreground(lipgloss.Color("#f0f6fc")).
 					Bold(true)
-				b.WriteString(actionStyle.Render("Actions:"))
+				b.WriteString(questionStyle.Render("Do you want to push branch?"))
+				b.WriteString("\n\n")
+
+				optionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#58a6ff")).
+					Bold(true)
+				b.WriteString(optionStyle.Render("y: Yes"))
 				b.WriteString("\n")
-				b.WriteString("  p: Push branch\n")
-				b.WriteString("  r: Retry (regenerate message)\n")
-				b.WriteString("  e: Edit message manually\n")
-				b.WriteString("\n")
+				b.WriteString(optionStyle.Render("n: No"))
+				b.WriteString("\n\n")
 			}
 		} else if m.commitError != "" {
 			errorStyle := lipgloss.NewStyle().
