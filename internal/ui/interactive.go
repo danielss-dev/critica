@@ -1,15 +1,21 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/danielss-dev/critica/internal/ai"
+	"github.com/danielss-dev/critica/internal/git"
 	"github.com/danielss-dev/critica/internal/parser"
 )
 
@@ -23,6 +29,15 @@ const (
 	fileListView viewMode = iota
 	diffView
 	searchMode
+	aiMenuView
+	aiAnalysisView
+	aiCommitView
+	aiCommitScopeView
+	aiCommitEditView
+	aiPRView
+	aiBranchSelectView
+	aiImproveView
+	aiExplainView
 )
 
 type fileFilter int
@@ -41,7 +56,9 @@ type model struct {
 	fileItems        []list.Item
 	list             list.Model
 	textInput        textinput.Model
+	textarea         textarea.Model
 	viewMode         viewMode
+	previousViewMode viewMode // Track previous view for AI menu navigation
 	selectedIdx      int
 	collapsed        map[int]bool
 	filterMode       fileFilter
@@ -52,6 +69,29 @@ type model struct {
 	renderer         *Renderer
 	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
+	// AI-related fields
+	aiService      *ai.Service
+	aiResult       *ai.AnalysisResult
+	aiLoading      bool
+	aiError        string
+	aiCommitMsg    string
+	aiPRDesc       string
+	aiImprovements []string
+	aiExplanation  string
+	// Branch selection fields
+	branches             []string
+	selectedSourceBranch string
+	selectedTargetBranch string
+	branchDiffContent    string
+	copySuccess          bool
+	// Commit workflow fields
+	commitScope           string // "staged" or "all"
+	commitMessageEditable bool
+	commitApplied         bool
+	commitError           string
+	commitPushed          bool
+	pushError             string
+	commitCompleted       bool
 }
 
 type fileItem struct {
@@ -64,6 +104,16 @@ type fileItem struct {
 func (f fileItem) FilterValue() string { return f.fullPath }
 func (f fileItem) Title() string       { return f.displayName }
 func (f fileItem) Description() string { return f.status }
+
+type aiMenuItem struct {
+	title       string
+	description string
+	viewMode    viewMode
+}
+
+func (a aiMenuItem) FilterValue() string { return a.title }
+func (a aiMenuItem) Title() string       { return a.title }
+func (a aiMenuItem) Description() string { return a.description }
 
 func filterDisplayName(filter fileFilter) string {
 	switch filter {
@@ -95,6 +145,37 @@ func buildFileItems(files []parser.FileDiff) []list.Item {
 			status:      status,
 			index:       i,
 		}
+	}
+	return items
+}
+
+func buildAIMenuItems() []list.Item {
+	items := []list.Item{
+		aiMenuItem{
+			title:       "AI Analysis",
+			description: "Analyze code changes for quality, issues, and improvements (a)",
+			viewMode:    aiAnalysisView,
+		},
+		aiMenuItem{
+			title:       "AI Commit Message",
+			description: "Generate a commit message based on changes (c)",
+			viewMode:    aiCommitView,
+		},
+		aiMenuItem{
+			title:       "AI PR Description",
+			description: "Generate a pull request description (p)",
+			viewMode:    aiPRView,
+		},
+		aiMenuItem{
+			title:       "AI Improvements",
+			description: "Get suggestions for code improvements (i)",
+			viewMode:    aiImproveView,
+		},
+		aiMenuItem{
+			title:       "AI Explain Changes",
+			description: "Get an explanation of what changed (e)",
+			viewMode:    aiExplainView,
+		},
 	}
 	return items
 }
@@ -156,7 +237,7 @@ func newCustomDelegate() customDelegate {
 	return d
 }
 
-func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions) error {
+func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rendererOpts RendererOptions, aiService *ai.Service) error {
 	delegate := newCustomDelegate()
 	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Changed Files"
@@ -178,14 +259,22 @@ func RunInteractive(allFiles, stagedFiles, unstagedFiles []parser.FileDiff, rend
 	ti.Placeholder = "Search files..."
 	ti.CharLimit = 50
 
+	// Create textarea for commit message editing
+	ta := textarea.New()
+	ta.Placeholder = "Enter commit message..."
+	ta.CharLimit = 500
+	ta.SetHeight(10)
+
 	m := model{
 		allFiles:         allFiles,
 		stagedFiles:      stagedFiles,
 		unstagedFiles:    unstagedFiles,
 		list:             l,
 		textInput:        ti,
+		textarea:         ta,
 		viewMode:         fileListView,
 		selectedIdx:      -1,
+		aiService:        aiService,
 		filterMode:       filterAll,
 		useColor:         rendererOpts.UseColor,
 		unified:          rendererOpts.Unified,
@@ -296,15 +385,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "a":
-				m.setFilter(filterAll)
-				return m, nil
-
-			case "s":
-				m.setFilter(filterStaged)
-				return m, nil
-
-			case "c":
-				m.setFilter(filterUnstaged)
+				m.previousViewMode = fileListView
+				m.viewMode = aiMenuView
+				aiMenuItems := buildAIMenuItems()
+				m.list.SetItems(aiMenuItems)
+				m.list.Title = "AI Functions"
 				return m, nil
 
 			case "o", "enter":
@@ -376,6 +461,144 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 
+		case aiMenuView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc", "backspace":
+				// Return to previous view
+				m.viewMode = m.previousViewMode
+				// Restore file list items
+				m.list.SetItems(m.fileItems)
+				m.updateListTitle()
+				return m, nil
+
+			case "c":
+				// Shortcut for commit
+				if m.aiService != nil {
+					// Check if there are staged files
+					if len(m.stagedFiles) > 0 {
+						// Automatically use staged files
+						m.commitScope = "staged"
+						m.viewMode = aiCommitView
+						m.aiLoading = true
+						m.aiError = ""
+						m.scrollOffset = 0
+						return m, m.generateCommitMessage()
+					} else if len(m.allFiles) > 0 {
+						// No staged files, ask to add all
+						m.viewMode = aiCommitScopeView
+						m.aiLoading = false
+						m.aiError = ""
+						m.scrollOffset = 0
+					} else {
+						// No changes at all
+						m.aiError = "No changes to commit"
+						m.viewMode = aiCommitView
+						m.aiLoading = false
+						m.scrollOffset = 0
+					}
+				}
+				return m, nil
+
+			case "a":
+				// Shortcut for analysis
+				if m.aiService != nil {
+					m.viewMode = aiAnalysisView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.performAIAnalysis()
+				}
+				return m, nil
+
+			case "p":
+				// Shortcut for PR description
+				if m.aiService != nil {
+					m.viewMode = aiBranchSelectView
+					m.aiLoading = false
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.loadBranches()
+				}
+				return m, nil
+
+			case "i":
+				// Shortcut for improvements
+				if m.aiService != nil {
+					m.viewMode = aiImproveView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.suggestImprovements()
+				}
+				return m, nil
+
+			case "e":
+				// Shortcut for explain
+				if m.aiService != nil {
+					m.viewMode = aiExplainView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.explainChanges()
+				}
+				return m, nil
+
+			case "enter":
+				// Select AI function
+				if len(m.list.Items()) > 0 {
+					selectedItem := m.list.SelectedItem()
+					if selectedItem != nil {
+						if item, ok := selectedItem.(aiMenuItem); ok {
+							if m.aiService != nil {
+								m.viewMode = item.viewMode
+								m.aiLoading = true
+								m.aiError = ""
+								m.scrollOffset = 0
+								switch item.viewMode {
+								case aiAnalysisView:
+									return m, m.performAIAnalysis()
+								case aiCommitView:
+									// Check if there are staged files
+									if len(m.stagedFiles) > 0 {
+										// Automatically use staged files
+										m.commitScope = "staged"
+										m.viewMode = aiCommitView
+										return m, m.generateCommitMessage()
+									} else if len(m.allFiles) > 0 {
+										// No staged files, ask to add all
+										m.viewMode = aiCommitScopeView
+										m.aiLoading = false
+										return m, nil
+									} else {
+										// No changes at all
+										m.aiError = "No changes to commit"
+										m.viewMode = aiCommitView
+										m.aiLoading = false
+										return m, nil
+									}
+								case aiPRView:
+									m.viewMode = aiBranchSelectView
+									return m, m.loadBranches()
+								case aiImproveView:
+									return m, m.suggestImprovements()
+								case aiExplainView:
+									return m, m.explainChanges()
+								}
+							}
+						}
+					}
+				}
+				return m, nil
+
+			default:
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+			}
+
 		case diffView:
 			switch msg.String() {
 			case "q", "ctrl+c":
@@ -397,18 +620,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "a":
-				m.setFilter(filterAll)
-				m.viewMode = fileListView
-				return m, nil
-
-			case "s":
-				m.setFilter(filterStaged)
-				m.viewMode = fileListView
-				return m, nil
-
-			case "c":
-				m.setFilter(filterUnstaged)
-				m.viewMode = fileListView
+				m.previousViewMode = diffView
+				m.viewMode = aiMenuView
+				aiMenuItems := buildAIMenuItems()
+				m.list.SetItems(aiMenuItems)
+				m.list.Title = "AI Functions"
 				return m, nil
 
 			case "tab":
@@ -469,7 +685,296 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+
+		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiPRView, aiBranchSelectView, aiImproveView, aiExplainView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "enter":
+				// Handle branch selection
+				if m.viewMode == aiBranchSelectView {
+					return m, m.selectBranch()
+				}
+				// For other views, handle normally
+				return m, nil
+
+			case "esc", "backspace":
+				if m.viewMode == aiCommitScopeView {
+					m.viewMode = aiMenuView
+					return m, nil
+				} else if m.viewMode == aiBranchSelectView {
+					m.viewMode = aiMenuView
+					return m, nil
+				}
+				m.viewMode = fileListView
+				m.aiLoading = false
+				m.aiError = ""
+				return m, nil
+
+			case "y":
+				// Add all files and generate commit message
+				if m.viewMode == aiCommitScopeView {
+					m.commitScope = "all"
+					m.viewMode = aiCommitView
+					m.aiLoading = true
+					m.aiError = ""
+					m.scrollOffset = 0
+					return m, m.generateCommitMessage()
+				}
+				// Push branch (Yes) - existing functionality
+				if m.viewMode == aiCommitView && m.commitApplied {
+					return m, m.pushBranch()
+				}
+				// Copy PR description
+				if m.viewMode == aiPRView && m.aiPRDesc != "" {
+					return m, m.copyToClipboard(m.aiPRDesc)
+				}
+				return m, nil
+
+			case "n":
+				// Cancel adding files and go back
+				if m.viewMode == aiCommitScopeView {
+					m.viewMode = aiMenuView
+					return m, nil
+				}
+				// Don't push (No) - existing functionality
+				if m.viewMode == aiCommitView && m.commitApplied {
+					m.commitCompleted = true
+					return m, nil
+				}
+				return m, nil
+
+			case "a":
+				// Apply commit
+				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
+					return m, m.applyCommit()
+				}
+				return m, nil
+
+			case "e":
+				// Edit commit message
+				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
+					m.textarea.SetValue(m.aiCommitMsg)
+					m.textarea.Focus()
+					m.viewMode = aiCommitEditView
+					return m, nil
+				}
+				return m, nil
+
+			case "r":
+				// Retry AI operation
+				if m.aiService != nil {
+					m.aiLoading = true
+					m.aiError = ""
+					switch m.viewMode {
+					case aiAnalysisView:
+						return m, m.performAIAnalysis()
+					case aiCommitView:
+						return m, m.generateCommitMessage()
+					case aiPRView:
+						return m, m.generatePRDescription()
+					case aiImproveView:
+						return m, m.suggestImprovements()
+					case aiExplainView:
+						return m, m.explainChanges()
+					}
+				}
+				return m, nil
+
+			// Vim motions for scrolling within AI content (only for non-branch selection views)
+			case "j", "down":
+				if m.viewMode != aiBranchSelectView {
+					m.scrollOffset++
+					return m, nil
+				}
+				// For branch selection, let the list handle navigation
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+
+			case "k", "up":
+				if m.viewMode != aiBranchSelectView {
+					if m.scrollOffset > 0 {
+						m.scrollOffset--
+					}
+					return m, nil
+				}
+				// For branch selection, let the list handle navigation
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
+
+			case "d", "ctrl+d":
+				// Page down
+				m.scrollOffset += m.height / 2
+				return m, nil
+
+			case "u", "ctrl+u":
+				// Page up
+				m.scrollOffset -= m.height / 2
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, nil
+
+			case "g":
+				// Go to top
+				m.scrollOffset = 0
+				return m, nil
+
+			case "G":
+				// Go to bottom (will be clamped in render)
+				m.scrollOffset = 999999
+				return m, nil
+			}
+
+		case aiCommitEditView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc":
+				m.viewMode = aiCommitView
+				return m, nil
+
+			case "ctrl+s":
+				// Save edited commit message
+				m.aiCommitMsg = m.textarea.Value()
+				m.viewMode = aiCommitView
+				return m, nil
+
+			default:
+				// Handle textarea updates (including backspace for text editing)
+				var cmd tea.Cmd
+				m.textarea, cmd = m.textarea.Update(msg)
+				return m, cmd
+			}
 		}
+
+	// Handle AI messages
+	case aiAnalysisResultMsg:
+		m.aiLoading = false
+		m.aiResult = msg.result
+		return m, nil
+
+	case aiAnalysisErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiCommitResultMsg:
+		m.aiLoading = false
+		m.aiCommitMsg = msg.commitMsg
+		return m, nil
+
+	case aiCommitErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiPRResultMsg:
+		m.aiLoading = false
+		m.aiPRDesc = msg.prDesc
+		return m, nil
+
+	case aiPRErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiImproveResultMsg:
+		m.aiLoading = false
+		m.aiImprovements = msg.improvements
+		return m, nil
+
+	case aiImproveErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case aiExplainResultMsg:
+		m.aiLoading = false
+		m.aiExplanation = msg.explanation
+		return m, nil
+
+	case aiExplainErrorMsg:
+		m.aiLoading = false
+		m.aiError = msg.err
+		return m, nil
+
+	case commitAppliedMsg:
+		m.commitApplied = true
+		m.commitError = ""
+		return m, nil
+
+	case commitErrorMsg:
+		m.commitApplied = false
+		m.commitError = msg.err
+		return m, nil
+
+	case pushSuccessMsg:
+		m.commitPushed = true
+		m.pushError = ""
+		return m, nil
+
+	case pushErrorMsg:
+		m.commitPushed = false
+		m.pushError = msg.err
+		return m, nil
+
+	case branchLoadResultMsg:
+		m.branches = msg.branches
+		// Convert branches to fileItem list for display
+		var branchItems []list.Item
+		for _, branch := range msg.branches {
+			branchItems = append(branchItems, fileItem{
+				fullPath:    branch,
+				displayName: branch,
+				status:      "branch",
+				index:       len(branchItems),
+			})
+		}
+		m.list.SetItems(branchItems)
+		m.list.Title = "Select Target Branch"
+		return m, nil
+
+	case branchLoadErrorMsg:
+		m.aiError = msg.err
+		return m, nil
+
+	case branchSelectedMsg:
+		// Get current branch as source
+		currentBranch, err := git.GetCurrentBranch(".")
+		if err != nil {
+			m.aiError = "Failed to get current branch"
+			return m, nil
+		}
+
+		// Validate current branch
+		if currentBranch == "" {
+			m.aiError = "Current branch name is empty"
+			return m, nil
+		}
+
+		// Set the branches
+		m.selectedSourceBranch = currentBranch
+		m.selectedTargetBranch = msg.branch
+
+		// Switch to PR view and start generating
+		m.viewMode = aiPRView
+		m.aiLoading = true
+		m.aiError = ""
+
+		return m, m.generateBranchPRDescription()
+
+	case branchSelectErrorMsg:
+		m.aiError = msg.err
+		return m, nil
+
+	case copySuccessMsg:
+		m.copySuccess = msg.success
+		return m, nil
 	}
 
 	return m, nil
@@ -483,6 +988,24 @@ func (m model) View() string {
 		return m.renderDiff()
 	case searchMode:
 		return m.renderSearch()
+	case aiMenuView:
+		return m.renderAIMenu()
+	case aiAnalysisView:
+		return m.renderAIAnalysis()
+	case aiCommitView:
+		return m.renderAICommit()
+	case aiCommitScopeView:
+		return m.renderAICommitScope()
+	case aiCommitEditView:
+		return m.renderAICommitEdit()
+	case aiPRView:
+		return m.renderAIPR()
+	case aiBranchSelectView:
+		return m.renderAIBranchSelect()
+	case aiImproveView:
+		return m.renderAIImprove()
+	case aiExplainView:
+		return m.renderAIExplain()
 	default:
 		return ""
 	}
@@ -520,7 +1043,7 @@ func (m model) renderFileList() string {
 		b.WriteString("\n\n")
 
 		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+		help := "space: show preview | o/enter: open full view | /: search | tab: toggle view | f: cycle filter | a: AI menu | q: quit"
 		b.WriteString(helpStyle.Render(help))
 		return b.String()
 	}
@@ -596,7 +1119,7 @@ func (m model) renderFileList() string {
 	// Help text
 	b.WriteString("\n")
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: all | s: staged | c: changed | q: quit"
+	help := "space: hide preview | o/enter: open full view | j/k: navigate | /: search | tab: toggle view | f: cycle filter | a: AI menu | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -858,6 +1381,21 @@ func (m model) renderSearch() string {
 	return b.String()
 }
 
+func (m model) renderAIMenu() string {
+	var b strings.Builder
+
+	// Show AI menu list
+	b.WriteString(m.list.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	help := "j/k: navigate | enter: select | c/a/p/i/e: shortcuts | esc: back | q: quit"
+	b.WriteString(helpStyle.Render(help))
+
+	return b.String()
+}
+
 func (m model) renderDiff() string {
 	if m.selectedIdx < 0 || m.selectedIdx >= len(m.files) {
 		return "No file selected"
@@ -980,7 +1518,7 @@ func (m model) renderDiff() string {
 
 	// Help bar
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f/a/s/c: filter | /: search | esc: back | q: quit"
+	help := "j/k: scroll | h/l: prev/next file | space: collapse/expand | g/G: top/bottom | ctrl+d/u: page down/up | tab: toggle view | f: cycle filter | a: AI menu | /: search | esc: back | q: quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1080,6 +1618,1086 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 		separator := m.renderer.theme.SeparatorStyle.Render("│")
 		b.WriteString(fmt.Sprintf("%s %s %s\n", leftLine, separator, rightLine))
 	}
+
+	return b.String()
+}
+
+// AI Command Functions
+
+func (m *model) performAIAnalysis() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		result, err := m.aiService.AnalyzeDiff(ctx, m.files)
+		if err != nil {
+			return aiAnalysisErrorMsg{err.Error()}
+		}
+		return aiAnalysisResultMsg{result}
+	}
+}
+
+func (m *model) generateCommitMessage() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Use the appropriate files based on scope
+		var filesToUse []parser.FileDiff
+		if m.commitScope == "staged" {
+			filesToUse = m.stagedFiles
+		} else {
+			filesToUse = m.allFiles // All files
+		}
+
+		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, filesToUse)
+		if err != nil {
+			return aiCommitErrorMsg{err.Error()}
+		}
+		return aiCommitResultMsg{commitMsg}
+	}
+}
+
+func (m *model) generatePRDescription() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		prDesc, err := m.aiService.GeneratePRDescription(ctx, m.files)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+		return aiPRResultMsg{prDesc}
+	}
+}
+
+func (m *model) suggestImprovements() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		improvements, err := m.aiService.SuggestImprovements(ctx, m.files)
+		if err != nil {
+			return aiImproveErrorMsg{err.Error()}
+		}
+		return aiImproveResultMsg{improvements}
+	}
+}
+
+func (m *model) explainChanges() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		explanation, err := m.aiService.ExplainChanges(ctx, m.files)
+		if err != nil {
+			return aiExplainErrorMsg{err.Error()}
+		}
+		return aiExplainResultMsg{explanation}
+	}
+}
+
+func (m *model) applyCommit() tea.Cmd {
+	return func() tea.Msg {
+		// First, stage all files if scope is "all"
+		if m.commitScope == "all" {
+			err := git.StageAllFiles(".")
+			if err != nil {
+				return commitErrorMsg{err.Error()}
+			}
+		}
+
+		// Create the commit
+		err := git.CreateCommit(".", m.aiCommitMsg)
+		if err != nil {
+			return commitErrorMsg{err.Error()}
+		}
+
+		return commitAppliedMsg{success: true, message: "Commit created successfully"}
+	}
+}
+
+func (m *model) pushBranch() tea.Cmd {
+	return func() tea.Msg {
+		err := git.PushBranch(".")
+		if err != nil {
+			return pushErrorMsg{err.Error()}
+		}
+
+		return pushSuccessMsg{success: true, message: "Branch pushed successfully"}
+	}
+}
+
+// AI Message Types
+
+type aiAnalysisResultMsg struct {
+	result *ai.AnalysisResult
+}
+
+type aiAnalysisErrorMsg struct {
+	err string
+}
+
+type aiCommitResultMsg struct {
+	commitMsg string
+}
+
+type aiCommitErrorMsg struct {
+	err string
+}
+
+type aiPRResultMsg struct {
+	prDesc string
+}
+
+type aiPRErrorMsg struct {
+	err string
+}
+
+type aiImproveResultMsg struct {
+	improvements []string
+}
+
+type aiImproveErrorMsg struct {
+	err string
+}
+
+type aiExplainResultMsg struct {
+	explanation string
+}
+
+type aiExplainErrorMsg struct {
+	err string
+}
+
+type commitScopeSelectedMsg struct {
+	scope string
+}
+
+type commitAppliedMsg struct {
+	success bool
+	message string
+}
+
+type commitErrorMsg struct {
+	err string
+}
+
+type pushSuccessMsg struct {
+	success bool
+	message string
+}
+
+type pushErrorMsg struct {
+	err string
+}
+
+// AI Render Functions
+
+func (m model) renderAIAnalysis() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Analysis Results"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Analyzing changes with AI..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	if m.aiResult == nil {
+		return b.String()
+	}
+
+	// Summary
+	if m.aiResult.Summary != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📝 Summary:"))
+		b.WriteString("\n")
+		b.WriteString(m.aiResult.Summary)
+		b.WriteString("\n\n")
+	}
+
+	// Code Quality
+	if m.aiResult.CodeQuality != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("🏆 Code Quality:"))
+		b.WriteString("\n")
+		b.WriteString(m.aiResult.CodeQuality)
+		b.WriteString("\n\n")
+	}
+
+	// Issues
+	if len(m.aiResult.Issues) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("⚠️  Issues Found:"))
+		b.WriteString("\n")
+		for i, issue := range m.aiResult.Issues {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, issue))
+		}
+		b.WriteString("\n")
+	}
+
+	// Improvements
+	if len(m.aiResult.Improvements) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("💡 Improvement Suggestions:"))
+		b.WriteString("\n")
+		for i, improvement := range m.aiResult.Improvements {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, improvement))
+		}
+		b.WriteString("\n")
+	}
+
+	// Security Notes
+	if len(m.aiResult.SecurityNotes) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("🔒 Security Notes:"))
+		b.WriteString("\n")
+		for i, note := range m.aiResult.SecurityNotes {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, note))
+		}
+		b.WriteString("\n")
+	}
+
+	// Performance Notes
+	if len(m.aiResult.PerformanceNotes) > 0 {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("⚡ Performance Notes:"))
+		b.WriteString("\n")
+		for i, note := range m.aiResult.PerformanceNotes {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, note))
+		}
+		b.WriteString("\n")
+	}
+
+	// Commit Message
+	if m.aiResult.CommitMessage != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📝 Suggested Commit Message:"))
+		b.WriteString("\n")
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(0, 0, 1, 0)
+		b.WriteString(codeStyle.Render(m.aiResult.CommitMessage))
+		b.WriteString("\n")
+	}
+
+	// PR Description
+	if m.aiResult.PRDescription != "" {
+		sectionStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#f0f6fc")).
+			Margin(0, 0, 1, 0)
+		b.WriteString(sectionStyle.Render("📋 PR Description:"))
+		b.WriteString("\n")
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(0, 0, 1, 0)
+		b.WriteString(codeStyle.Render(m.aiResult.PRDescription))
+		b.WriteString("\n")
+	}
+
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
+
+	return result
+}
+
+func (m model) renderAICommit() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Commit Message"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Generating commit message..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// Display the actual commit message
+	if m.aiCommitMsg != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiCommitMsg))
+		b.WriteString("\n\n")
+
+		// Show commit status
+		if m.commitApplied {
+			successStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3fb950")).
+				Bold(true)
+			b.WriteString(successStyle.Render("✅ Commit applied successfully!"))
+			b.WriteString("\n\n")
+
+			// Show push status
+			if m.commitPushed {
+				pushSuccessStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#3fb950")).
+					Bold(true)
+				b.WriteString(pushSuccessStyle.Render("✅ Branch pushed successfully!"))
+				b.WriteString("\n\n")
+			} else if m.pushError != "" {
+				pushErrorStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#f85149")).
+					Bold(true)
+				b.WriteString(pushErrorStyle.Render("❌ Push Error: " + m.pushError))
+				b.WriteString("\n\n")
+			} else if m.commitCompleted {
+				completionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#3fb950")).
+					Bold(true)
+				b.WriteString(completionStyle.Render("✅ Commit workflow completed!"))
+				b.WriteString("\n\n")
+			} else {
+				// Show simple push prompt
+				questionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#f0f6fc")).
+					Bold(true)
+				b.WriteString(questionStyle.Render("Do you want to push branch?"))
+				b.WriteString("\n\n")
+
+				optionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#58a6ff")).
+					Bold(true)
+				b.WriteString(optionStyle.Render("y: Yes"))
+				b.WriteString("\n")
+				b.WriteString(optionStyle.Render("n: No"))
+				b.WriteString("\n\n")
+			}
+		} else if m.commitError != "" {
+			errorStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f85149")).
+				Bold(true)
+			b.WriteString(errorStyle.Render("❌ Error: " + m.commitError))
+			b.WriteString("\n\n")
+		} else {
+			// Show action options
+			actionStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f0f6fc")).
+				Bold(true)
+			b.WriteString(actionStyle.Render("Actions:"))
+			b.WriteString("\n")
+			b.WriteString("  a: Apply commit\n")
+			b.WriteString("  r: Retry (regenerate message)\n")
+			b.WriteString("  e: Edit message manually\n")
+			b.WriteString("\n")
+		}
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No commit message generated"))
+	}
+
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
+
+	return result
+}
+
+func (m model) renderAIPR() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI PR Description"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Generating PR description..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// Display the actual PR description
+	if m.aiPRDesc != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiPRDesc))
+		b.WriteString("\n\n")
+
+		// Show copy success message
+		if m.copySuccess {
+			successStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3fb950")).
+				Bold(true)
+			b.WriteString(successStyle.Render("✅ Copied to clipboard!"))
+			b.WriteString("\n\n")
+		}
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No PR description generated"))
+	}
+
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry | y: copy")
+
+	return result
+}
+
+func (m model) renderAIImprove() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Improvement Suggestions"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Analyzing for improvements..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// Display the actual improvements
+	if len(m.aiImprovements) > 0 {
+		for i, improvement := range m.aiImprovements {
+			itemStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f0f6fc")).
+				Margin(0, 0, 1, 0)
+			b.WriteString(itemStyle.Render(fmt.Sprintf("%d. %s", i+1, improvement)))
+			b.WriteString("\n")
+		}
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No improvement suggestions generated"))
+	}
+
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
+
+	return result
+}
+
+func (m model) renderAIExplain() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Change Explanation"))
+	b.WriteString("\n")
+
+	if m.aiLoading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Margin(1, 0)
+		b.WriteString(loadingStyle.Render("Explaining changes..."))
+		return b.String()
+	}
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'r' to retry or 'esc' to go back"))
+		return b.String()
+	}
+
+	// Display the actual explanation
+	if m.aiExplanation != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiExplanation))
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No explanation generated"))
+	}
+
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
+
+	return result
+}
+func (m model) renderAICommitScope() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 AI Commit Message"))
+	b.WriteString("\n\n")
+
+	// Show warning message
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Margin(0, 0, 1, 0)
+
+	b.WriteString(warningStyle.Render("No staged files found."))
+	b.WriteString("\n\n")
+
+	// Show question
+	questionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Bold(true).
+		Margin(0, 0, 1, 0)
+
+	b.WriteString(questionStyle.Render("Do you want to add all files (git add .)?"))
+	b.WriteString("\n\n")
+
+	// Show options
+	optionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#58a6ff")).
+		Bold(true)
+
+	b.WriteString(optionStyle.Render("y: Yes (add all files and generate commit message)"))
+	b.WriteString("\n")
+	b.WriteString(optionStyle.Render("n: No (cancel)"))
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("Press y or n to select, or esc to go back"))
+
+	return b.String()
+}
+
+func (m model) renderAICommitEdit() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 Edit Commit Message"))
+	b.WriteString("\n\n")
+
+	// Show the textarea
+	b.WriteString(m.textarea.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	b.WriteString(helpStyle.Render("ctrl+s: save | esc: cancel"))
+
+	return b.String()
+}
+
+// Branch selection functions
+
+func (m *model) loadBranches() tea.Cmd {
+	return func() tea.Msg {
+		// Get both local and remote branches
+		localBranches, err := git.GetAllBranches(".")
+		if err != nil {
+			return branchLoadErrorMsg{err.Error()}
+		}
+
+		remoteBranches, err := git.GetRemoteBranches(".")
+		if err != nil {
+			// If remote branches fail, just use local branches
+			return branchLoadResultMsg{localBranches}
+		}
+
+		// Combine local and remote branches
+		allBranches := append(localBranches, remoteBranches...)
+		return branchLoadResultMsg{allBranches}
+	}
+}
+
+func (m *model) selectBranch() tea.Cmd {
+	return func() tea.Msg {
+		if len(m.list.Items()) == 0 {
+			return branchSelectErrorMsg{"No branches available"}
+		}
+
+		selectedItem := m.list.SelectedItem()
+		if selectedItem == nil {
+			return branchSelectErrorMsg{"No branch selected"}
+		}
+
+		if item, ok := selectedItem.(fileItem); ok {
+			// Validate branch names
+			if item.fullPath == "" {
+				return branchSelectErrorMsg{"Selected branch name is empty"}
+			}
+
+			// Return the selected branch name
+			return branchSelectedMsg{item.fullPath}
+		}
+
+		return branchSelectErrorMsg{"Invalid branch selection"}
+	}
+}
+
+func (m *model) generateBranchPRDescription() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Validate that branches are set
+		if m.selectedSourceBranch == "" {
+			return aiPRErrorMsg{"Source branch not set"}
+		}
+		if m.selectedTargetBranch == "" {
+			return aiPRErrorMsg{"Target branch not set"}
+		}
+
+		// Get diff between branches
+		diffContent, err := git.GetBranchDiff(".", m.selectedSourceBranch, m.selectedTargetBranch)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+
+		if diffContent == "" {
+			return aiPRErrorMsg{"No changes between branches"}
+		}
+
+		// Store diff content for plain text copy
+		m.branchDiffContent = diffContent
+
+		// Generate PR description with branch context
+		prDesc, err := m.aiService.GeneratePRDescriptionWithBranches(ctx, diffContent, m.selectedSourceBranch, m.selectedTargetBranch)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+
+		return aiPRResultMsg{prDesc}
+	}
+}
+
+func (m *model) copyToClipboard(content string) tea.Cmd {
+	return func() tea.Msg {
+		err := clipboard.WriteAll(content)
+		if err != nil {
+			return copySuccessMsg{false}
+		}
+		return copySuccessMsg{true}
+	}
+}
+
+// Branch selection message types
+
+type branchLoadResultMsg struct {
+	branches []string
+}
+
+type branchLoadErrorMsg struct {
+	err string
+}
+
+type branchSelectedMsg struct {
+	branch string
+}
+
+type branchSelectErrorMsg struct {
+	err string
+}
+
+type copySuccessMsg struct {
+	success bool
+}
+
+// renderAIBranchSelect renders the branch selection view
+func (m model) renderAIBranchSelect() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 Select Target Branch for PR"))
+	b.WriteString("\n")
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'esc' to go back"))
+		return b.String()
+	}
+
+	// Show current branch and explanation
+	currentBranch, _ := git.GetCurrentBranch(".")
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Margin(1, 0)
+	b.WriteString(infoStyle.Render(fmt.Sprintf("Current branch: %s", currentBranch)))
+	b.WriteString("\n")
+
+	explanationStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(0, 0, 1, 0)
+	b.WriteString(explanationStyle.Render("Select the target branch to compare against (where you want to merge into)"))
+	b.WriteString("\n\n")
+
+	// Show branch list
+	b.WriteString(m.list.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	help := "j/k: navigate | enter: select | esc: back"
+	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/danielss-dev/critica/internal/ai"
 	"github.com/danielss-dev/critica/internal/config"
 	"github.com/danielss-dev/critica/internal/git"
 	"github.com/danielss-dev/critica/internal/parser"
@@ -17,6 +18,7 @@ var (
 	noColor     bool
 	unified     bool
 	interactive bool
+	aiEnabled   bool
 
 	appConfig *config.Config
 )
@@ -46,6 +48,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable color output")
 	rootCmd.Flags().BoolVarP(&unified, "unified", "u", false, "Show unified diff view (non-split)")
 	rootCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive mode with fuzzy finder and collapsible files")
+	rootCmd.Flags().BoolVar(&aiEnabled, "ai", false, "Enable AI analysis and suggestions")
 	rootCmd.PersistentPreRunE = applyConfig
 }
 
@@ -142,7 +145,14 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		return ui.RunInteractive(files, stagedFiles, unstagedFiles, rendererOpts)
+		// Initialize AI service for interactive mode
+		var aiService *ai.Service
+		aiConfig := ai.LoadConfig()
+		if aiConfig.APIKey != "" {
+			aiService = ai.NewService(aiConfig)
+		}
+
+		return ui.RunInteractive(files, stagedFiles, unstagedFiles, rendererOpts, aiService)
 	}
 
 	// Render the diff statically
