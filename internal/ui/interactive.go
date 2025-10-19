@@ -81,6 +81,8 @@ type model struct {
 	commitMessageEditable bool
 	commitApplied         bool
 	commitError           string
+	commitPushed          bool
+	pushError             string
 }
 
 type fileItem struct {
@@ -695,10 +697,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
+			case "p":
+				// Push branch
+				if m.viewMode == aiCommitView && m.commitApplied {
+					return m, m.pushBranch()
+				}
+				return m, nil
+
 			case "e":
 				// Edit commit message
 				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
 					m.textarea.SetValue(m.aiCommitMsg)
+					m.textarea.Focus()
 					m.viewMode = aiCommitEditView
 					return m, nil
 				}
@@ -836,6 +846,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commitErrorMsg:
 		m.commitApplied = false
 		m.commitError = msg.err
+		return m, nil
+
+	case pushSuccessMsg:
+		m.commitPushed = true
+		m.pushError = ""
+		return m, nil
+
+	case pushErrorMsg:
+		m.commitPushed = false
+		m.pushError = msg.err
 		return m, nil
 	}
 
@@ -1577,6 +1597,17 @@ func (m *model) applyCommit() tea.Cmd {
 	}
 }
 
+func (m *model) pushBranch() tea.Cmd {
+	return func() tea.Msg {
+		err := git.PushBranch(".")
+		if err != nil {
+			return pushErrorMsg{err.Error()}
+		}
+
+		return pushSuccessMsg{success: true, message: "Branch pushed successfully"}
+	}
+}
+
 // AI Message Types
 
 type aiAnalysisResultMsg struct {
@@ -1629,6 +1660,15 @@ type commitAppliedMsg struct {
 }
 
 type commitErrorMsg struct {
+	err string
+}
+
+type pushSuccessMsg struct {
+	success bool
+	message string
+}
+
+type pushErrorMsg struct {
 	err string
 }
 
@@ -1881,6 +1921,32 @@ func (m model) renderAICommit() string {
 				Bold(true)
 			b.WriteString(successStyle.Render("✅ Commit applied successfully!"))
 			b.WriteString("\n\n")
+
+			// Show push status
+			if m.commitPushed {
+				pushSuccessStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#3fb950")).
+					Bold(true)
+				b.WriteString(pushSuccessStyle.Render("✅ Branch pushed successfully!"))
+				b.WriteString("\n\n")
+			} else if m.pushError != "" {
+				pushErrorStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#f85149")).
+					Bold(true)
+				b.WriteString(pushErrorStyle.Render("❌ Push Error: " + m.pushError))
+				b.WriteString("\n\n")
+			} else {
+				// Show push action
+				actionStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#f0f6fc")).
+					Bold(true)
+				b.WriteString(actionStyle.Render("Actions:"))
+				b.WriteString("\n")
+				b.WriteString("  p: Push branch\n")
+				b.WriteString("  r: Retry (regenerate message)\n")
+				b.WriteString("  e: Edit message manually\n")
+				b.WriteString("\n")
+			}
 		} else if m.commitError != "" {
 			errorStyle := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#f85149")).

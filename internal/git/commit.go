@@ -112,11 +112,11 @@ func GetStagedFiles(path string) ([]string, error) {
 	return files, nil
 }
 
-// GetUnstagedFiles returns the list of unstaged files
-func GetUnstagedFiles(path string) ([]string, error) {
+// PushBranch pushes the current branch to the remote repository
+func PushBranch(path string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path: %w", err)
+		return fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
 	workDir := absPath
@@ -125,18 +125,36 @@ func GetUnstagedFiles(path string) ([]string, error) {
 		workDir = filepath.Dir(absPath)
 	}
 
-	cmd := exec.Command("git", "diff", "--name-only")
+	cmd := exec.Command("git", "push")
+	cmd.Dir = workDir
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to push branch: %w", err)
+	}
+
+	return nil
+}
+
+// GetCurrentBranch returns the current branch name
+func GetCurrentBranch(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	workDir := absPath
+	stat, err := os.Stat(absPath)
+	if err == nil && !stat.IsDir() {
+		workDir = filepath.Dir(absPath)
+	}
+
+	cmd := exec.Command("git", "branch", "--show-current")
 	cmd.Dir = workDir
 
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get unstaged files: %w", err)
+		return "", fmt.Errorf("failed to get current branch: %w", err)
 	}
 
-	files := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(files) == 1 && files[0] == "" {
-		return []string{}, nil
-	}
-
-	return files, nil
+	return strings.TrimSpace(string(output)), nil
 }
