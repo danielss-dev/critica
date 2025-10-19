@@ -469,10 +469,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "c":
 				// Shortcut for commit
 				if m.aiService != nil {
-					m.viewMode = aiCommitScopeView
-					m.aiLoading = false
-					m.aiError = ""
-					m.scrollOffset = 0
+					// Check if there are staged files
+					if len(m.stagedFiles) > 0 {
+						// Automatically use staged files
+						m.commitScope = "staged"
+						m.viewMode = aiCommitView
+						m.aiLoading = true
+						m.aiError = ""
+						m.scrollOffset = 0
+						return m, m.generateCommitMessage()
+					} else if len(m.allFiles) > 0 {
+						// No staged files, ask to add all
+						m.viewMode = aiCommitScopeView
+						m.aiLoading = false
+						m.aiError = ""
+						m.scrollOffset = 0
+					} else {
+						// No changes at all
+						m.aiError = "No changes to commit"
+						m.viewMode = aiCommitView
+						m.aiLoading = false
+						m.scrollOffset = 0
+					}
 				}
 				return m, nil
 
@@ -535,8 +553,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								case aiAnalysisView:
 									return m, m.performAIAnalysis()
 								case aiCommitView:
-									m.viewMode = aiCommitScopeView
-									return m, nil
+									// Check if there are staged files
+									if len(m.stagedFiles) > 0 {
+										// Automatically use staged files
+										m.commitScope = "staged"
+										m.viewMode = aiCommitView
+										return m, m.generateCommitMessage()
+									} else if len(m.allFiles) > 0 {
+										// No staged files, ask to add all
+										m.viewMode = aiCommitScopeView
+										m.aiLoading = false
+										return m, nil
+									} else {
+										// No changes at all
+										m.aiError = "No changes to commit"
+										m.viewMode = aiCommitView
+										m.aiLoading = false
+										return m, nil
+									}
 								case aiPRView:
 									return m, m.generatePRDescription()
 								case aiImproveView:
@@ -667,20 +701,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.aiError = ""
 				return m, nil
 
-			case "1":
-				// Select staged files only
-				if m.viewMode == aiCommitScopeView {
-					m.commitScope = "staged"
-					m.viewMode = aiCommitView
-					m.aiLoading = true
-					m.aiError = ""
-					m.scrollOffset = 0
-					return m, m.generateCommitMessage()
-				}
-				return m, nil
-
-			case "2":
-				// Select all files (git add .)
+			case "y":
+				// Add all files and generate commit message
 				if m.viewMode == aiCommitScopeView {
 					m.commitScope = "all"
 					m.viewMode = aiCommitView
@@ -689,27 +711,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollOffset = 0
 					return m, m.generateCommitMessage()
 				}
-				return m, nil
-
-			case "a":
-				// Apply commit
-				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
-					return m, m.applyCommit()
-				}
-				return m, nil
-
-			case "y":
-				// Push branch (Yes)
+				// Push branch (Yes) - existing functionality
 				if m.viewMode == aiCommitView && m.commitApplied {
 					return m, m.pushBranch()
 				}
 				return m, nil
 
 			case "n":
-				// Don't push (No) - show completion message
+				// Cancel adding files and go back
+				if m.viewMode == aiCommitScopeView {
+					m.viewMode = aiMenuView
+					return m, nil
+				}
+				// Don't push (No) - existing functionality
 				if m.viewMode == aiCommitView && m.commitApplied {
 					m.commitCompleted = true
 					return m, nil
+				}
+				return m, nil
+
+			case "a":
+				// Apply commit
+				if m.viewMode == aiCommitView && m.aiCommitMsg != "" {
+					return m, m.applyCommit()
 				}
 				return m, nil
 
@@ -1536,7 +1560,7 @@ func (m *model) generateCommitMessage() tea.Cmd {
 		if m.commitScope == "staged" {
 			filesToUse = m.stagedFiles
 		} else {
-			filesToUse = m.files // All files
+			filesToUse = m.allFiles // All files
 		}
 
 		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, filesToUse)
@@ -2351,38 +2375,41 @@ func (m model) renderAICommitScope() string {
 		Foreground(lipgloss.Color("#58a6ff")).
 		Margin(1, 0)
 
-	b.WriteString(titleStyle.Render("🤖 AI Commit Message - Select Scope"))
+	b.WriteString(titleStyle.Render("🤖 AI Commit Message"))
+	b.WriteString("\n\n")
+
+	// Show warning message
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Margin(0, 0, 1, 0)
+
+	b.WriteString(warningStyle.Render("No staged files found."))
+	b.WriteString("\n\n")
+
+	// Show question
+	questionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Bold(true).
+		Margin(0, 0, 1, 0)
+
+	b.WriteString(questionStyle.Render("Do you want to add all files (git add .)?"))
 	b.WriteString("\n\n")
 
 	// Show options
 	optionStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#f0f6fc")).
-		Margin(0, 0, 1, 0)
+		Foreground(lipgloss.Color("#58a6ff")).
+		Bold(true)
 
-	b.WriteString(optionStyle.Render("Choose which files to include in the commit:"))
+	b.WriteString(optionStyle.Render("y: Yes (add all files and generate commit message)"))
+	b.WriteString("\n")
+	b.WriteString(optionStyle.Render("n: No (cancel)"))
 	b.WriteString("\n\n")
-
-	// Option 1: Staged files only
-	option1Style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#58a6ff")).
-		Bold(true)
-	b.WriteString(option1Style.Render("1. Staged files only"))
-	b.WriteString("\n")
-	b.WriteString("   Use currently staged files for commit message generation\n\n")
-
-	// Option 2: All files
-	option2Style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#58a6ff")).
-		Bold(true)
-	b.WriteString(option2Style.Render("2. All files (git add .)"))
-	b.WriteString("\n")
-	b.WriteString("   Stage all files and generate commit message\n\n")
 
 	// Help text
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 1 or 2 to select, or esc to go back"))
+	b.WriteString(helpStyle.Render("Press y or n to select, or esc to go back"))
 
 	return b.String()
 }
