@@ -126,6 +126,22 @@ func (s *Service) GeneratePRDescription(ctx context.Context, files []parser.File
 	return strings.TrimSpace(response), nil
 }
 
+// GeneratePRDescriptionWithBranches generates a PR description based on branch diff
+func (s *Service) GeneratePRDescriptionWithBranches(ctx context.Context, diffContent, sourceBranch, targetBranch string) (string, error) {
+	if diffContent == "" {
+		return "No changes to describe", nil
+	}
+
+	prompt := s.buildPRDescriptionPromptWithBranches(diffContent, sourceBranch, targetBranch)
+
+	response, err := s.callAI(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("PR description generation failed: %w", err)
+	}
+
+	return strings.TrimSpace(response), nil
+}
+
 // SuggestImprovements provides code improvement suggestions
 func (s *Service) SuggestImprovements(ctx context.Context, files []parser.FileDiff) ([]string, error) {
 	if len(files) == 0 {
@@ -270,6 +286,23 @@ Git diff:
 %s
 
 Respond with a well-formatted PR description.`, diffContent)
+}
+
+// buildPRDescriptionPromptWithBranches creates a prompt for PR description generation with branch context
+func (s *Service) buildPRDescriptionPromptWithBranches(diffContent, sourceBranch, targetBranch string) string {
+	return fmt.Sprintf(`Generate a comprehensive PR description for a pull request from branch "%s" to "%s". Include:
+
+1. Summary of changes
+2. What was changed and why
+3. Testing considerations
+4. Breaking changes (if any)
+5. Screenshots or examples (if applicable)
+6. Branch context and merge considerations
+
+Git diff from %s to %s:
+%s
+
+Respond with a well-formatted PR description that includes the branch context.`, sourceBranch, targetBranch, sourceBranch, targetBranch, diffContent)
 }
 
 // buildImprovementsPrompt creates a prompt for improvement suggestions

@@ -197,8 +197,20 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 
 func runAIGeneratePR(cmd *cobra.Command, args []string) error {
 	path := "."
+	targetBranch := ""
+
+	// Parse arguments
 	if len(args) > 0 {
-		path = args[0]
+		// Check if first argument is a path or branch name
+		if git.IsGitRepository(args[0]) {
+			path = args[0]
+			if len(args) > 1 {
+				targetBranch = args[1]
+			}
+		} else {
+			// First argument is a branch name
+			targetBranch = args[0]
+		}
 	}
 
 	// Check if we're in a git repository
@@ -206,21 +218,108 @@ func runAIGeneratePR(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not a git repository: %s", path)
 	}
 
-	// Get the diff
-	diffOutput, err := git.GetDiff(path, staged)
+	// Get current branch
+	currentBranch, err := git.GetCurrentBranch(path)
 	if err != nil {
-		return fmt.Errorf("failed to get diff: %w", err)
+		return fmt.Errorf("failed to get current branch: %w", err)
 	}
 
-	if diffOutput == "" {
-		fmt.Println("No changes to describe")
+	// Get all branches (local and remote)
+	localBranches, err := git.GetAllBranches(path)
+	if err != nil {
+		return fmt.Errorf("failed to get local branches: %w", err)
+	}
+
+	remoteBranches, err := git.GetRemoteBranches(path)
+	var branches []string
+	if err != nil {
+		// If remote branches fail, just use local branches
+		branches = localBranches
+	} else {
+		// Combine local and remote branches
+		branches = append(localBranches, remoteBranches...)
+	}
+
+	if len(branches) < 2 {
+		fmt.Println("Not enough branches for comparison")
 		return nil
 	}
 
-	// Parse the diff
-	files, err := parser.ParseDiff(diffOutput)
+	// Show branch selection
+	fmt.Println("Available branches:")
+	for i, branch := range branches {
+		marker := "  "
+		if branch == currentBranch {
+			marker = "→ "
+		}
+		fmt.Printf("%s%d. %s%s\n", marker, i+1, branch, func() string {
+			if branch == currentBranch {
+				return " (current)"
+			}
+			return ""
+		}())
+	}
+	fmt.Println()
+	fmt.Printf("Current branch: %s\n", currentBranch)
+	fmt.Println("Selecting target branch to compare against (where you want to merge into)")
+	fmt.Println()
+
+	// If target branch is provided as parameter, use it
+	if targetBranch != "" {
+		// Validate that the target branch exists
+		found := false
+		for _, branch := range branches {
+			if branch == targetBranch {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("target branch '%s' not found in available branches", targetBranch)
+		}
+
+		// Don't allow comparing branch to itself
+		if targetBranch == currentBranch {
+			return fmt.Errorf("cannot compare branch to itself")
+		}
+
+		fmt.Printf("Using target branch: %s\n", targetBranch)
+	} else {
+		// Prompt user to select target branch
+		fmt.Print("Enter target branch number (1-", len(branches), "): ")
+		var input string
+		fmt.Scanln(&input)
+
+		// Parse selection
+		var selection int
+		if _, err := fmt.Sscanf(input, "%d", &selection); err != nil {
+			return fmt.Errorf("invalid selection: %s", input)
+		}
+
+		if selection < 1 || selection > len(branches) {
+			return fmt.Errorf("selection out of range: %d", selection)
+		}
+
+		targetBranch = branches[selection-1]
+
+		// Don't allow comparing branch to itself
+		if targetBranch == currentBranch {
+			return fmt.Errorf("cannot compare branch to itself")
+		}
+	}
+
+	fmt.Printf("Comparing %s → %s\n", currentBranch, targetBranch)
+	fmt.Println()
+
+	// Get diff between branches
+	diffOutput, err := git.GetBranchDiff(path, currentBranch, targetBranch)
 	if err != nil {
-		return fmt.Errorf("failed to parse diff: %w", err)
+		return fmt.Errorf("failed to get branch diff: %w", err)
+	}
+
+	if diffOutput == "" {
+		fmt.Println("No changes between branches")
+		return nil
 	}
 
 	// Load AI configuration
@@ -239,8 +338,8 @@ func runAIGeneratePR(cmd *cobra.Command, args []string) error {
 	fmt.Println("🤖 Generating PR description...")
 	fmt.Println()
 
-	// Generate PR description
-	prDesc, err := aiService.GeneratePRDescription(ctx, files)
+	// Generate PR description with branch context
+	prDesc, err := aiService.GeneratePRDescriptionWithBranches(ctx, diffOutput, currentBranch, targetBranch)
 	if err != nil {
 		return fmt.Errorf("PR description generation failed: %w", err)
 	}

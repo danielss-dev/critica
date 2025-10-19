@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -34,6 +35,7 @@ const (
 	aiCommitScopeView
 	aiCommitEditView
 	aiPRView
+	aiBranchSelectView
 	aiImproveView
 	aiExplainView
 )
@@ -76,6 +78,12 @@ type model struct {
 	aiPRDesc       string
 	aiImprovements []string
 	aiExplanation  string
+	// Branch selection fields
+	branches             []string
+	selectedSourceBranch string
+	selectedTargetBranch string
+	branchDiffContent    string
+	copySuccess          bool
 	// Commit workflow fields
 	commitScope           string // "staged" or "all"
 	commitMessageEditable bool
@@ -508,11 +516,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "p":
 				// Shortcut for PR description
 				if m.aiService != nil {
-					m.viewMode = aiPRView
-					m.aiLoading = true
+					m.viewMode = aiBranchSelectView
+					m.aiLoading = false
 					m.aiError = ""
 					m.scrollOffset = 0
-					return m, m.generatePRDescription()
+					return m, m.loadBranches()
 				}
 				return m, nil
 
@@ -572,7 +580,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 										return m, nil
 									}
 								case aiPRView:
-									return m, m.generatePRDescription()
+									m.viewMode = aiBranchSelectView
+									return m, m.loadBranches()
 								case aiImproveView:
 									return m, m.suggestImprovements()
 								case aiExplainView:
@@ -583,12 +592,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-
-			case "j", "k", "up", "down":
-				// Navigate AI menu
-				var cmd tea.Cmd
-				m.list, cmd = m.list.Update(msg)
-				return m, cmd
 
 			default:
 				var cmd tea.Cmd
@@ -683,10 +686,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiCommitEditView, aiPRView, aiImproveView, aiExplainView:
+		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiCommitEditView, aiPRView, aiBranchSelectView, aiImproveView, aiExplainView:
 			switch msg.String() {
 			case "q", "ctrl+c":
 				return m, tea.Quit
+
+			case "enter":
+				// Handle branch selection
+				if m.viewMode == aiBranchSelectView {
+					return m, m.selectBranch()
+				}
+				// For other views, handle normally
+				return m, nil
 
 			case "esc", "backspace":
 				if m.viewMode == aiCommitScopeView {
@@ -694,6 +705,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				} else if m.viewMode == aiCommitEditView {
 					m.viewMode = aiCommitView
+					return m, nil
+				} else if m.viewMode == aiBranchSelectView {
+					m.viewMode = aiMenuView
 					return m, nil
 				}
 				m.viewMode = fileListView
@@ -714,6 +728,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Push branch (Yes) - existing functionality
 				if m.viewMode == aiCommitView && m.commitApplied {
 					return m, m.pushBranch()
+				}
+				// Copy PR description
+				if m.viewMode == aiPRView && m.aiPRDesc != "" {
+					return m, m.copyToClipboard(m.aiPRDesc)
 				}
 				return m, nil
 
@@ -776,16 +794,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
-			// Vim motions for scrolling within AI content
+			// Vim motions for scrolling within AI content (only for non-branch selection views)
 			case "j", "down":
-				m.scrollOffset++
-				return m, nil
+				if m.viewMode != aiBranchSelectView {
+					m.scrollOffset++
+					return m, nil
+				}
+				// For branch selection, let the list handle navigation
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
 
 			case "k", "up":
-				if m.scrollOffset > 0 {
-					m.scrollOffset--
+				if m.viewMode != aiBranchSelectView {
+					if m.scrollOffset > 0 {
+						m.scrollOffset--
+					}
+					return m, nil
 				}
-				return m, nil
+				// For branch selection, let the list handle navigation
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
 
 			case "d", "ctrl+d":
 				// Page down
@@ -890,6 +920,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commitPushed = false
 		m.pushError = msg.err
 		return m, nil
+
+	case branchLoadResultMsg:
+		m.branches = msg.branches
+		// Convert branches to fileItem list for display
+		var branchItems []list.Item
+		for _, branch := range msg.branches {
+			branchItems = append(branchItems, fileItem{
+				fullPath:    branch,
+				displayName: branch,
+				status:      "branch",
+				index:       len(branchItems),
+			})
+		}
+		m.list.SetItems(branchItems)
+		m.list.Title = "Select Target Branch"
+		return m, nil
+
+	case branchLoadErrorMsg:
+		m.aiError = msg.err
+		return m, nil
+
+	case branchSelectedMsg:
+		// Get current branch as source
+		currentBranch, err := git.GetCurrentBranch(".")
+		if err != nil {
+			m.aiError = "Failed to get current branch"
+			return m, nil
+		}
+
+		// Validate current branch
+		if currentBranch == "" {
+			m.aiError = "Current branch name is empty"
+			return m, nil
+		}
+
+		// Set the branches
+		m.selectedSourceBranch = currentBranch
+		m.selectedTargetBranch = msg.branch
+
+		// Switch to PR view and start generating
+		m.viewMode = aiPRView
+		m.aiLoading = true
+		m.aiError = ""
+
+		return m, m.generateBranchPRDescription()
+
+	case branchSelectErrorMsg:
+		m.aiError = msg.err
+		return m, nil
+
+	case copySuccessMsg:
+		m.copySuccess = msg.success
+		return m, nil
 	}
 
 	return m, nil
@@ -915,6 +998,8 @@ func (m model) View() string {
 		return m.renderAICommitEdit()
 	case aiPRView:
 		return m.renderAIPR()
+	case aiBranchSelectView:
+		return m.renderAIBranchSelect()
 	case aiImproveView:
 		return m.renderAIImprove()
 	case aiExplainView:
@@ -2107,6 +2192,16 @@ func (m model) renderAIPR() string {
 			Padding(1).
 			Margin(1, 0)
 		b.WriteString(codeStyle.Render(m.aiPRDesc))
+		b.WriteString("\n\n")
+
+		// Show copy success message
+		if m.copySuccess {
+			successStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3fb950")).
+				Bold(true)
+			b.WriteString(successStyle.Render("✅ Copied to clipboard!"))
+			b.WriteString("\n\n")
+		}
 	} else {
 		codeStyle := lipgloss.NewStyle().
 			Background(lipgloss.Color("#21262d")).
@@ -2163,7 +2258,7 @@ func (m model) renderAIPR() string {
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry | y: copy")
 
 	return result
 }
@@ -2434,6 +2529,173 @@ func (m model) renderAICommitEdit() string {
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
 	b.WriteString(helpStyle.Render("ctrl+s: save | esc: cancel"))
+
+	return b.String()
+}
+
+// Branch selection functions
+
+func (m *model) loadBranches() tea.Cmd {
+	return func() tea.Msg {
+		// Get both local and remote branches
+		localBranches, err := git.GetAllBranches(".")
+		if err != nil {
+			return branchLoadErrorMsg{err.Error()}
+		}
+
+		remoteBranches, err := git.GetRemoteBranches(".")
+		if err != nil {
+			// If remote branches fail, just use local branches
+			return branchLoadResultMsg{localBranches}
+		}
+
+		// Combine local and remote branches
+		allBranches := append(localBranches, remoteBranches...)
+		return branchLoadResultMsg{allBranches}
+	}
+}
+
+func (m *model) selectBranch() tea.Cmd {
+	return func() tea.Msg {
+		if len(m.list.Items()) == 0 {
+			return branchSelectErrorMsg{"No branches available"}
+		}
+
+		selectedItem := m.list.SelectedItem()
+		if selectedItem == nil {
+			return branchSelectErrorMsg{"No branch selected"}
+		}
+
+		if item, ok := selectedItem.(fileItem); ok {
+			// Validate branch names
+			if item.fullPath == "" {
+				return branchSelectErrorMsg{"Selected branch name is empty"}
+			}
+
+			// Return the selected branch name
+			return branchSelectedMsg{item.fullPath}
+		}
+
+		return branchSelectErrorMsg{"Invalid branch selection"}
+	}
+}
+
+func (m *model) generateBranchPRDescription() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Validate that branches are set
+		if m.selectedSourceBranch == "" {
+			return aiPRErrorMsg{"Source branch not set"}
+		}
+		if m.selectedTargetBranch == "" {
+			return aiPRErrorMsg{"Target branch not set"}
+		}
+
+		// Get diff between branches
+		diffContent, err := git.GetBranchDiff(".", m.selectedSourceBranch, m.selectedTargetBranch)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+
+		if diffContent == "" {
+			return aiPRErrorMsg{"No changes between branches"}
+		}
+
+		// Store diff content for plain text copy
+		m.branchDiffContent = diffContent
+
+		// Generate PR description with branch context
+		prDesc, err := m.aiService.GeneratePRDescriptionWithBranches(ctx, diffContent, m.selectedSourceBranch, m.selectedTargetBranch)
+		if err != nil {
+			return aiPRErrorMsg{err.Error()}
+		}
+
+		return aiPRResultMsg{prDesc}
+	}
+}
+
+func (m *model) copyToClipboard(content string) tea.Cmd {
+	return func() tea.Msg {
+		err := clipboard.WriteAll(content)
+		if err != nil {
+			return copySuccessMsg{false}
+		}
+		return copySuccessMsg{true}
+	}
+}
+
+// Branch selection message types
+
+type branchLoadResultMsg struct {
+	branches []string
+}
+
+type branchLoadErrorMsg struct {
+	err string
+}
+
+type branchSelectedMsg struct {
+	branch string
+}
+
+type branchSelectErrorMsg struct {
+	err string
+}
+
+type copySuccessMsg struct {
+	success bool
+}
+
+// renderAIBranchSelect renders the branch selection view
+func (m model) renderAIBranchSelect() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff")).
+		Margin(1, 0)
+
+	b.WriteString(titleStyle.Render("🤖 Select Target Branch for PR"))
+	b.WriteString("\n")
+
+	if m.aiError != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Margin(1, 0)
+		b.WriteString(errorStyle.Render("Error: " + m.aiError))
+		b.WriteString("\n\n")
+		helpStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e"))
+		b.WriteString(helpStyle.Render("Press 'esc' to go back"))
+		return b.String()
+	}
+
+	// Show current branch and explanation
+	currentBranch, _ := git.GetCurrentBranch(".")
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f0f6fc")).
+		Margin(1, 0)
+	b.WriteString(infoStyle.Render(fmt.Sprintf("Current branch: %s", currentBranch)))
+	b.WriteString("\n")
+
+	explanationStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(0, 0, 1, 0)
+	b.WriteString(explanationStyle.Render("Select the target branch to compare against (where you want to merge into)"))
+	b.WriteString("\n\n")
+
+	// Show branch list
+	b.WriteString(m.list.View())
+	b.WriteString("\n\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Margin(1, 0)
+	help := "j/k: navigate | enter: select | esc: back"
+	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
 }

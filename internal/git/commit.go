@@ -134,27 +134,3 @@ func PushBranch(path string) error {
 
 	return nil
 }
-
-// GetCurrentBranch returns the current branch name
-func GetCurrentBranch(path string) (string, error) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	workDir := absPath
-	stat, err := os.Stat(absPath)
-	if err == nil && !stat.IsDir() {
-		workDir = filepath.Dir(absPath)
-	}
-
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = workDir
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get current branch: %w", err)
-	}
-
-	return strings.TrimSpace(string(output)), nil
-}
