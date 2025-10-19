@@ -686,7 +686,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiCommitEditView, aiPRView, aiBranchSelectView, aiImproveView, aiExplainView:
+		case aiAnalysisView, aiCommitView, aiCommitScopeView, aiPRView, aiBranchSelectView, aiImproveView, aiExplainView:
 			switch msg.String() {
 			case "q", "ctrl+c":
 				return m, tea.Quit
@@ -702,9 +702,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "backspace":
 				if m.viewMode == aiCommitScopeView {
 					m.viewMode = aiMenuView
-					return m, nil
-				} else if m.viewMode == aiCommitEditView {
-					m.viewMode = aiCommitView
 					return m, nil
 				} else if m.viewMode == aiBranchSelectView {
 					m.viewMode = aiMenuView
@@ -761,15 +758,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.textarea.SetValue(m.aiCommitMsg)
 					m.textarea.Focus()
 					m.viewMode = aiCommitEditView
-					return m, nil
-				}
-				return m, nil
-
-			case "ctrl+s":
-				// Save edited commit message
-				if m.viewMode == aiCommitEditView {
-					m.aiCommitMsg = m.textarea.Value()
-					m.viewMode = aiCommitView
 					return m, nil
 				}
 				return m, nil
@@ -841,9 +829,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		// Handle textarea updates for commit edit view
-		default:
-			if m.viewMode == aiCommitEditView {
+		case aiCommitEditView:
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc":
+				m.viewMode = aiCommitView
+				return m, nil
+
+			case "ctrl+s":
+				// Save edited commit message
+				m.aiCommitMsg = m.textarea.Value()
+				m.viewMode = aiCommitView
+				return m, nil
+
+			default:
+				// Handle textarea updates (including backspace for text editing)
 				var cmd tea.Cmd
 				m.textarea, cmd = m.textarea.Update(msg)
 				return m, cmd
