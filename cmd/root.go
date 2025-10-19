@@ -145,15 +145,13 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Initialize AI service if enabled
+		// Initialize AI service for interactive mode
 		var aiService *ai.Service
-		if aiEnabled {
-			aiConfig := ai.LoadConfig()
-			if aiConfig.APIKey != "" {
-				aiService = ai.NewService(aiConfig)
-			}
+		aiConfig := ai.LoadConfig()
+		if aiConfig.APIKey != "" {
+			aiService = ai.NewService(aiConfig)
 		}
-		
+
 		return ui.RunInteractive(files, stagedFiles, unstagedFiles, rendererOpts, aiService)
 	}
 

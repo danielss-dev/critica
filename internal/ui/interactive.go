@@ -61,10 +61,14 @@ type model struct {
 	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
 	// AI-related fields
-	aiService *ai.Service
-	aiResult  *ai.AnalysisResult
-	aiLoading bool
-	aiError   string
+	aiService      *ai.Service
+	aiResult       *ai.AnalysisResult
+	aiLoading      bool
+	aiError        string
+	aiCommitMsg    string
+	aiPRDesc       string
+	aiImprovements []string
+	aiExplanation  string
 }
 
 type fileItem struct {
@@ -347,6 +351,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewMode = aiAnalysisView
 					m.aiLoading = true
 					m.aiError = ""
+					m.scrollOffset = 0 // Reset scroll when entering AI view
 					return m, m.performAIAnalysis()
 				}
 				return m, nil
@@ -357,6 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewMode = aiCommitView
 					m.aiLoading = true
 					m.aiError = ""
+					m.scrollOffset = 0 // Reset scroll when entering AI view
 					return m, m.generateCommitMessage()
 				}
 				return m, nil
@@ -367,6 +373,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewMode = aiPRView
 					m.aiLoading = true
 					m.aiError = ""
+					m.scrollOffset = 0 // Reset scroll when entering AI view
 					return m, m.generatePRDescription()
 				}
 				return m, nil
@@ -377,6 +384,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewMode = aiImproveView
 					m.aiLoading = true
 					m.aiError = ""
+					m.scrollOffset = 0 // Reset scroll when entering AI view
 					return m, m.suggestImprovements()
 				}
 				return m, nil
@@ -387,6 +395,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewMode = aiExplainView
 					m.aiLoading = true
 					m.aiError = ""
+					m.scrollOffset = 0 // Reset scroll when entering AI view
 					return m, m.explainChanges()
 				}
 				return m, nil
@@ -564,6 +573,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
+
+			// Vim motions for scrolling within AI content
+			case "j", "down":
+				m.scrollOffset++
+				return m, nil
+
+			case "k", "up":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+				return m, nil
+
+			case "d", "ctrl+d":
+				// Page down
+				m.scrollOffset += m.height / 2
+				return m, nil
+
+			case "u", "ctrl+u":
+				// Page up
+				m.scrollOffset -= m.height / 2
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, nil
+
+			case "g":
+				// Go to top
+				m.scrollOffset = 0
+				return m, nil
+
+			case "G":
+				// Go to bottom (will be clamped in render)
+				m.scrollOffset = 999999
+				return m, nil
 			}
 		}
 
@@ -580,7 +623,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case aiCommitResultMsg:
 		m.aiLoading = false
-		// Store commit message in a field for rendering
+		m.aiCommitMsg = msg.commitMsg
 		return m, nil
 
 	case aiCommitErrorMsg:
@@ -590,7 +633,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case aiPRResultMsg:
 		m.aiLoading = false
-		// Store PR description in a field for rendering
+		m.aiPRDesc = msg.prDesc
 		return m, nil
 
 	case aiPRErrorMsg:
@@ -600,7 +643,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case aiImproveResultMsg:
 		m.aiLoading = false
-		// Store improvements in a field for rendering
+		m.aiImprovements = msg.improvements
 		return m, nil
 
 	case aiImproveErrorMsg:
@@ -610,7 +653,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case aiExplainResultMsg:
 		m.aiLoading = false
-		// Store explanation in a field for rendering
+		m.aiExplanation = msg.explanation
 		return m, nil
 
 	case aiExplainErrorMsg:
@@ -1499,12 +1542,57 @@ func (m model) renderAIAnalysis() string {
 		b.WriteString("\n")
 	}
 
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
-	return b.String()
+	return result
 }
 
 func (m model) renderAICommit() string {
@@ -1538,20 +1626,72 @@ func (m model) renderAICommit() string {
 		return b.String()
 	}
 
-	// This would be populated by the AI commit result
-	// For now, show a placeholder
-	codeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Padding(1).
-		Margin(1, 0)
-	b.WriteString(codeStyle.Render("Generated commit message will appear here"))
+	// Display the actual commit message
+	if m.aiCommitMsg != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiCommitMsg))
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No commit message generated"))
+	}
 
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
-	return b.String()
+	return result
 }
 
 func (m model) renderAIPR() string {
@@ -1585,20 +1725,72 @@ func (m model) renderAIPR() string {
 		return b.String()
 	}
 
-	// This would be populated by the AI PR result
-	// For now, show a placeholder
-	codeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Padding(1).
-		Margin(1, 0)
-	b.WriteString(codeStyle.Render("Generated PR description will appear here"))
+	// Display the actual PR description
+	if m.aiPRDesc != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiPRDesc))
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No PR description generated"))
+	}
 
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
-	return b.String()
+	return result
 }
 
 func (m model) renderAIImprove() string {
@@ -1632,20 +1824,74 @@ func (m model) renderAIImprove() string {
 		return b.String()
 	}
 
-	// This would be populated by the AI improve result
-	// For now, show a placeholder
-	codeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Padding(1).
-		Margin(1, 0)
-	b.WriteString(codeStyle.Render("Improvement suggestions will appear here"))
+	// Display the actual improvements
+	if len(m.aiImprovements) > 0 {
+		for i, improvement := range m.aiImprovements {
+			itemStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#f0f6fc")).
+				Margin(0, 0, 1, 0)
+			b.WriteString(itemStyle.Render(fmt.Sprintf("%d. %s", i+1, improvement)))
+			b.WriteString("\n")
+		}
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No improvement suggestions generated"))
+	}
 
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
-	return b.String()
+	return result
 }
 
 func (m model) renderAIExplain() string {
@@ -1679,18 +1925,70 @@ func (m model) renderAIExplain() string {
 		return b.String()
 	}
 
-	// This would be populated by the AI explain result
-	// For now, show a placeholder
-	codeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Padding(1).
-		Margin(1, 0)
-	b.WriteString(codeStyle.Render("Change explanation will appear here"))
+	// Display the actual explanation
+	if m.aiExplanation != "" {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render(m.aiExplanation))
+	} else {
+		codeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Padding(1).
+			Margin(1, 0)
+		b.WriteString(codeStyle.Render("No explanation generated"))
+	}
 
+	// Apply viewport scrolling
+	allLines := strings.Split(b.String(), "\n")
+	totalLines := len(allLines)
+
+	// Calculate viewport height (height - help - padding)
+	viewportHeight := m.height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 10
+	}
+
+	// Clamp scroll offset
+	maxScroll := totalLines - viewportHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollOffset := m.scrollOffset
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Get visible lines
+	endLine := scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	visibleLines := allLines[scrollOffset:endLine]
+	result := strings.Join(visibleLines, "\n")
+
+	// Show scroll indicator if needed
+	if totalLines > viewportHeight {
+		result += "\n"
+		scrollInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		percentage := int(float64(scrollOffset) / float64(maxScroll) * 100)
+		if scrollOffset >= maxScroll {
+			percentage = 100
+		}
+		result += scrollInfo.Render(fmt.Sprintf("[%d%%] Line %d-%d of %d", percentage, scrollOffset+1, endLine, totalLines))
+	}
+
+	// Add help text
+	result += "\n\n"
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8b949e")).
 		Margin(1, 0)
-	b.WriteString(helpStyle.Render("Press 'esc' to go back | 'r' to retry"))
+	result += helpStyle.Render("j/k: scroll | g/G: top/bottom | d/u: page | esc: back | r: retry")
 
-	return b.String()
+	return result
 }
