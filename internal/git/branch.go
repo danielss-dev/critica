@@ -148,7 +148,8 @@ func GetBranchDiff(path, fromBranch, toBranch string) (string, error) {
 	}
 
 	// Use a safer approach - compare the branches directly
-	cmd := exec.Command("git", "diff", "-U5", "--no-color", fromBranch, toBranch)
+	// For PR descriptions, we want to show changes in fromBranch that are not in toBranch
+	cmd := exec.Command("git", "diff", "-U5", "--no-color", toBranch, fromBranch)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer
