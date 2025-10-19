@@ -61,10 +61,10 @@ type model struct {
 	scrollOffset     int  // Current scroll position in diff view
 	previewCollapsed bool // Whether the preview pane is collapsed
 	// AI-related fields
-	aiService        *ai.Service
-	aiResult         *ai.AnalysisResult
-	aiLoading        bool
-	aiError          string
+	aiService *ai.Service
+	aiResult  *ai.AnalysisResult
+	aiLoading bool
+	aiError   string
 }
 
 type fileItem struct {
@@ -1245,7 +1245,7 @@ func (m model) renderHunkSplit(hunk parser.Hunk, lexer chroma.Lexer) string {
 
 func (m *model) performAIAnalysis() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		result, err := m.aiService.AnalyzeDiff(ctx, m.files)
@@ -1258,7 +1258,7 @@ func (m *model) performAIAnalysis() tea.Cmd {
 
 func (m *model) generateCommitMessage() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		commitMsg, err := m.aiService.GenerateCommitMessage(ctx, m.files)
@@ -1271,7 +1271,7 @@ func (m *model) generateCommitMessage() tea.Cmd {
 
 func (m *model) generatePRDescription() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		prDesc, err := m.aiService.GeneratePRDescription(ctx, m.files)
@@ -1284,7 +1284,7 @@ func (m *model) generatePRDescription() tea.Cmd {
 
 func (m *model) suggestImprovements() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		improvements, err := m.aiService.SuggestImprovements(ctx, m.files)
@@ -1297,7 +1297,7 @@ func (m *model) suggestImprovements() tea.Cmd {
 
 func (m *model) explainChanges() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
 		explanation, err := m.aiService.ExplainChanges(ctx, m.files)

@@ -121,7 +121,7 @@ func runAIAnalysis(cmd *cobra.Command, args []string) error {
 	aiService := ai.NewService(aiConfig)
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	fmt.Println("🤖 Analyzing changes with AI...")
@@ -176,7 +176,7 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 	aiService := ai.NewService(aiConfig)
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	fmt.Println("🤖 Generating commit message...")
@@ -233,7 +233,7 @@ func runAIGeneratePR(cmd *cobra.Command, args []string) error {
 	aiService := ai.NewService(aiConfig)
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	fmt.Println("🤖 Generating PR description...")
@@ -290,7 +290,7 @@ func runAIImprovements(cmd *cobra.Command, args []string) error {
 	aiService := ai.NewService(aiConfig)
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	fmt.Println("🤖 Analyzing for improvements...")
@@ -354,7 +354,7 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 	aiService := ai.NewService(aiConfig)
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	fmt.Println("🤖 Explaining changes...")

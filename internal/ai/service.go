@@ -19,11 +19,11 @@ type Service struct {
 
 // Config holds AI service configuration
 type Config struct {
-	APIKey      string
-	Model       string
-	MaxTokens   int
-	Temperature float32
-	BaseURL     string
+	APIKey              string
+	Model               string
+	MaxCompletionTokens int
+	Temperature         float32
+	BaseURL             string
 }
 
 // AnalysisResult contains the AI analysis results
@@ -57,11 +57,11 @@ func NewService(config *Config) *Service {
 // LoadConfig loads AI configuration from environment variables and config file
 func LoadConfig() *Config {
 	config := &Config{
-		APIKey:      os.Getenv("OPENAI_API_KEY"),
-		Model:       getEnvOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
-		MaxTokens:   4000,
-		Temperature: 0.3,
-		BaseURL:     os.Getenv("OPENAI_BASE_URL"),
+		APIKey:              os.Getenv("OPENAI_API_KEY"),
+		Model:               getEnvOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
+		MaxCompletionTokens: 4000,
+		Temperature:         0.3,
+		BaseURL:             os.Getenv("OPENAI_BASE_URL"),
 	}
 
 	return config
@@ -225,7 +225,7 @@ func (s *Service) buildAnalysisPrompt(diffContent string) string {
 6. Clear explanations of what changed and why
 
 Please respond with a JSON object containing:
-- summary: A brief overview of the changes
+- summary: A brief overview of the changes (string, not JSON)
 - improvements: Array of specific improvement suggestions
 - issues: Array of potential problems or bugs
 - explanations: Array of explanations for complex changes
@@ -317,8 +317,8 @@ func (s *Service) callAI(ctx context.Context, prompt string) (string, error) {
 				Content: prompt,
 			},
 		},
-		MaxTokens:   s.config.MaxTokens,
-		Temperature: s.config.Temperature,
+		MaxCompletionTokens: s.config.MaxCompletionTokens,
+		Temperature:         s.config.Temperature,
 	}
 
 	resp, err := s.client.CreateChatCompletion(ctx, req)
@@ -335,25 +335,121 @@ func (s *Service) callAI(ctx context.Context, prompt string) (string, error) {
 
 // parseAnalysisResponse parses the AI response into AnalysisResult
 func (s *Service) parseAnalysisResponse(response string) (*AnalysisResult, error) {
-	var result AnalysisResult
+	// Clean the response - remove any extra text before/after JSON
+	cleanedResponse := strings.TrimSpace(response)
 
-	// Try to parse as JSON first
-	if err := json.Unmarshal([]byte(response), &result); err == nil {
-		return &result, nil
+	// Try to find JSON object in the response
+	startIdx := strings.Index(cleanedResponse, "{")
+	endIdx := strings.LastIndex(cleanedResponse, "}")
+
+	if startIdx == -1 || endIdx == -1 || startIdx >= endIdx {
+		// No JSON found, return basic result
+		return &AnalysisResult{
+			Summary:          response,
+			Improvements:     []string{},
+			Issues:           []string{},
+			Explanations:     []string{response},
+			CommitMessage:    "Update code",
+			PRDescription:    response,
+			CodeQuality:      "Unknown",
+			SecurityNotes:    []string{},
+			PerformanceNotes: []string{},
+		}, nil
 	}
 
-	// If JSON parsing fails, create a basic result
-	result.Summary = response
-	result.Improvements = []string{}
-	result.Issues = []string{}
-	result.Explanations = []string{response}
-	result.CommitMessage = "Update code"
-	result.PRDescription = response
-	result.CodeQuality = "Unknown"
-	result.SecurityNotes = []string{}
-	result.PerformanceNotes = []string{}
+	// Extract just the JSON part
+	jsonStr := cleanedResponse[startIdx : endIdx+1]
 
-	return &result, nil
+	// Try to parse as a map
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &jsonMap); err != nil {
+		// If JSON parsing fails, return basic result
+		return &AnalysisResult{
+			Summary:          response,
+			Improvements:     []string{},
+			Issues:           []string{},
+			Explanations:     []string{response},
+			CommitMessage:    "Update code",
+			PRDescription:    response,
+			CodeQuality:      "Unknown",
+			SecurityNotes:    []string{},
+			PerformanceNotes: []string{},
+		}, nil
+	}
+
+	// Extract fields from the map with proper handling
+	result := &AnalysisResult{
+		Summary:          extractStringFromMap(jsonMap, "summary"),
+		CodeQuality:      extractStringFromMap(jsonMap, "code_quality"),
+		CommitMessage:    extractStringFromMap(jsonMap, "commit_message"),
+		PRDescription:    extractStringFromMap(jsonMap, "pr_description"),
+		Improvements:     extractStringArrayFromMap(jsonMap, "improvements"),
+		Issues:           extractStringArrayFromMap(jsonMap, "issues"),
+		Explanations:     extractStringArrayFromMap(jsonMap, "explanations"),
+		SecurityNotes:    extractStringArrayFromMap(jsonMap, "security_notes"),
+		PerformanceNotes: extractStringArrayFromMap(jsonMap, "performance_notes"),
+	}
+
+	// Handle cases where summary or PRDescription contain JSON
+	result.Summary = sanitizeField(result.Summary, "Summary")
+	result.PRDescription = sanitizeField(result.PRDescription, "PR Description")
+
+	return result, nil
+}
+
+// extractStringFromMap safely extracts a string value from a map
+func extractStringFromMap(m map[string]interface{}, key string) string {
+	if val, ok := m[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
+// extractStringArrayFromMap safely extracts a string array from a map
+func extractStringArrayFromMap(m map[string]interface{}, key string) []string {
+	if val, ok := m[key]; ok {
+		if arr, ok := val.([]interface{}); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+			return result
+		}
+	}
+	return []string{}
+}
+
+// sanitizeField handles cases where a field contains JSON instead of plain text
+func sanitizeField(field, fieldName string) string {
+	if field == "" {
+		return ""
+	}
+
+	// Check if field contains JSON (starts with {)
+	if strings.HasPrefix(strings.TrimSpace(field), "{") {
+		// Try to extract useful information from the JSON
+		var jsonMap map[string]interface{}
+		if err := json.Unmarshal([]byte(field), &jsonMap); err == nil {
+			// Try to extract a meaningful summary from the JSON
+			if summary, ok := jsonMap["summary"].(string); ok && summary != "" {
+				return summary
+			}
+			// If no summary, try to get the first meaningful field
+			for _, key := range []string{"description", "message", "content", "text"} {
+				if val, ok := jsonMap[key].(string); ok && val != "" {
+					return val
+				}
+			}
+		}
+		// If we can't extract meaningful content, provide a generic message
+		return fmt.Sprintf("%s generated successfully", fieldName)
+	}
+
+	return field
 }
 
 // getEnvOrDefault gets an environment variable or returns a default value
