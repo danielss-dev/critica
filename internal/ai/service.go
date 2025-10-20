@@ -57,7 +57,7 @@ func NewService(config *Config) *Service {
 func LoadConfig() *Config {
 	config := &Config{
 		APIKey:              os.Getenv("OPENAI_API_KEY"),
-		Model:               getEnvOrDefault("OPENAI_MODEL", "gpt-5-nano-2025-08-07"),
+		Model:               getEnvOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
 		MaxCompletionTokens: 4000,
 		BaseURL:             os.Getenv("OPENAI_BASE_URL"),
 	}

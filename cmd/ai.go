@@ -48,11 +48,12 @@ Uses AI to analyze changes and create appropriate commit messages following conv
 }
 
 var prCmd = &cobra.Command{
-	Use:   "pr [path]",
+	Use:   "pr [path] [target-branch]",
 	Short: "Generate PR description",
 	Long: `Generate a comprehensive PR description based on the git diff.
-Creates detailed PR descriptions including summary, changes, and testing considerations.`,
-	Args: cobra.MaximumNArgs(1),
+Creates detailed PR descriptions including summary, changes, and testing considerations.
+If target-branch is not provided, you'll be prompted to select one.`,
+	Args: cobra.MaximumNArgs(2),
 	RunE: runAIGeneratePR,
 }
 
