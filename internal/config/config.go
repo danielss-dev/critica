@@ -31,10 +31,10 @@ type Config struct {
 	AddedTextColor   string `json:"added_text_color,omitempty"`
 	DeletedTextColor string `json:"deleted_text_color,omitempty"`
 	// AI Configuration
-	AIEnabled        *bool  `json:"ai_enabled,omitempty"`
-	OpenAIAPIKey     string `json:"openai_api_key,omitempty"`
-	OpenAIModel      string `json:"openai_model,omitempty"`
-	OpenAIBaseURL    string `json:"openai_base_url,omitempty"`
+	AIEnabled     *bool  `json:"ai_enabled,omitempty"`
+	OpenAIAPIKey  string `json:"openai_api_key,omitempty"`
+	OpenAIModel   string `json:"openai_model,omitempty"`
+	OpenAIBaseURL string `json:"openai_base_url,omitempty"`
 }
 
 func Load() (*Config, error) {

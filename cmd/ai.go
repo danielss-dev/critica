@@ -124,10 +124,10 @@ func runAIAnalysis(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	fmt.Println("🤖 Analyzing changes with AI...")
+	fmt.Print("🤖 Analyzing changes with AI...")
 	fmt.Println()
 
-	// Perform analysis
+	// Perform analysis (quiet streaming - no visible output during processing)
 	result, err := aiService.AnalyzeDiff(ctx, files)
 	if err != nil {
 		return fmt.Errorf("AI analysis failed: %w", err)
@@ -216,15 +216,13 @@ func runAIGenerateCommit(cmd *cobra.Command, args []string) error {
 	fmt.Println("🤖 Generating commit message...")
 	fmt.Println()
 
-	// Generate commit message
+	// Generate commit message (streams to stdout)
 	commitMsg, err := aiService.GenerateCommitMessage(ctx, files)
 	if err != nil {
 		return fmt.Errorf("commit message generation failed: %w", err)
 	}
 
-	fmt.Println("Generated commit message:")
 	fmt.Println()
-	fmt.Println(commitMsg)
 	fmt.Println()
 
 	// Ask for confirmation to apply commit
@@ -410,15 +408,13 @@ func runAIGeneratePR(cmd *cobra.Command, args []string) error {
 	fmt.Println("🤖 Generating PR description...")
 	fmt.Println()
 
-	// Generate PR description with branch context
-	prDesc, err := aiService.GeneratePRDescriptionWithBranches(ctx, diffOutput, currentBranch, targetBranch)
+	// Generate PR description with branch context (streams to stdout)
+	_, err = aiService.GeneratePRDescriptionWithBranches(ctx, diffOutput, currentBranch, targetBranch)
 	if err != nil {
 		return fmt.Errorf("PR description generation failed: %w", err)
 	}
 
-	fmt.Println("Generated PR description:")
-	fmt.Println("─" + strings.Repeat("─", 50))
-	fmt.Println(prDesc)
+	fmt.Println()
 	fmt.Println("─" + strings.Repeat("─", 50))
 	return nil
 }
@@ -467,22 +463,13 @@ func runAIImprovements(cmd *cobra.Command, args []string) error {
 	fmt.Println("🤖 Analyzing for improvements...")
 	fmt.Println()
 
-	// Get improvements
-	improvements, err := aiService.SuggestImprovements(ctx, files)
+	// Get improvements (streams to stdout)
+	_, err = aiService.SuggestImprovements(ctx, files)
 	if err != nil {
 		return fmt.Errorf("improvement suggestions failed: %w", err)
 	}
 
-	if len(improvements) == 0 {
-		fmt.Println("No specific improvements suggested.")
-		return nil
-	}
-
-	fmt.Println("Improvement suggestions:")
-	fmt.Println("─" + strings.Repeat("─", 30))
-	for i, improvement := range improvements {
-		fmt.Printf("%d. %s\n", i+1, improvement)
-	}
+	fmt.Println()
 	fmt.Println("─" + strings.Repeat("─", 30))
 	return nil
 }
@@ -531,15 +518,13 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 	fmt.Println("🤖 Explaining changes...")
 	fmt.Println()
 
-	// Get explanation
-	explanation, err := aiService.ExplainChanges(ctx, files)
+	// Get explanation (streams to stdout)
+	_, err = aiService.ExplainChanges(ctx, files)
 	if err != nil {
 		return fmt.Errorf("change explanation failed: %w", err)
 	}
 
-	fmt.Println("Change explanation:")
-	fmt.Println("─" + strings.Repeat("─", 30))
-	fmt.Println(explanation)
+	fmt.Println()
 	fmt.Println("─" + strings.Repeat("─", 30))
 	return nil
 }

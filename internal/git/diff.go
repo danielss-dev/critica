@@ -165,9 +165,11 @@ func getUntrackedFilesDiff(workDir, filterPath string) (string, error) {
 
 		// If a filter path is specified, check if this file matches
 		relPath, _ := filepath.Rel(workDir, filterPath)
+		// Normalize to forward slashes for comparison with git output (which always uses /)
+		relPath = filepath.ToSlash(relPath)
 		if relPath != "." && relPath != "" {
 			// Filter path is a subdirectory or file
-			if !strings.HasPrefix(file, relPath+string(filepath.Separator)) && file != relPath {
+			if !strings.HasPrefix(file, relPath+"/") && file != relPath {
 				continue
 			}
 		}
@@ -179,12 +181,15 @@ func getUntrackedFilesDiff(workDir, filterPath string) (string, error) {
 			continue
 		}
 
+		// Normalize file path to forward slashes for git diff format
+		gitFilePath := filepath.ToSlash(file)
+
 		// Generate diff format for new file
-		result.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", file, file))
+		result.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", gitFilePath, gitFilePath))
 		result.WriteString("new file mode 100644\n")
 		result.WriteString("index 0000000..0000000\n")
 		result.WriteString("--- /dev/null\n")
-		result.WriteString(fmt.Sprintf("+++ b/%s\n", file))
+		result.WriteString(fmt.Sprintf("+++ b/%s\n", gitFilePath))
 		result.WriteString("@@ -0,0 +1,")
 
 		lines := strings.Split(string(content), "\n")
