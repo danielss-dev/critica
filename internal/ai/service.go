@@ -1,14 +1,17 @@
 package ai
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/danielss-dev/critica/internal/parser"
 	"github.com/sashabaranov/go-openai"
+	"github.com/mattn/go-isatty"
 )
 
 // Service handles AI operations for code analysis
@@ -77,8 +80,8 @@ func (s *Service) AnalyzeDiff(ctx context.Context, files []parser.FileDiff) (*An
 	// Create the analysis prompt
 	prompt := s.buildAnalysisPrompt(diffContent)
 
-	// Call the AI service
-	response, err := s.callAI(ctx, prompt)
+	// Call the AI service with quiet streaming (don't display raw JSON)
+	response, err := s.callAIStreamQuiet(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("AI analysis failed: %w", err)
 	}
@@ -101,7 +104,7 @@ func (s *Service) GenerateCommitMessage(ctx context.Context, files []parser.File
 	diffContent := s.prepareDiffContent(files)
 	prompt := s.buildCommitMessagePrompt(diffContent)
 
-	response, err := s.callAI(ctx, prompt)
+	response, err := s.callAIStream(ctx, prompt, os.Stdout)
 	if err != nil {
 		return "", fmt.Errorf("commit message generation failed: %w", err)
 	}
@@ -118,7 +121,7 @@ func (s *Service) GeneratePRDescription(ctx context.Context, files []parser.File
 	diffContent := s.prepareDiffContent(files)
 	prompt := s.buildPRDescriptionPrompt(diffContent)
 
-	response, err := s.callAI(ctx, prompt)
+	response, err := s.callAIStream(ctx, prompt, os.Stdout)
 	if err != nil {
 		return "", fmt.Errorf("PR description generation failed: %w", err)
 	}
@@ -134,7 +137,7 @@ func (s *Service) GeneratePRDescriptionWithBranches(ctx context.Context, diffCon
 
 	prompt := s.buildPRDescriptionPromptWithBranches(diffContent, sourceBranch, targetBranch)
 
-	response, err := s.callAI(ctx, prompt)
+	response, err := s.callAIStream(ctx, prompt, os.Stdout)
 	if err != nil {
 		return "", fmt.Errorf("PR description generation failed: %w", err)
 	}
@@ -151,7 +154,7 @@ func (s *Service) SuggestImprovements(ctx context.Context, files []parser.FileDi
 	diffContent := s.prepareDiffContent(files)
 	prompt := s.buildImprovementsPrompt(diffContent)
 
-	response, err := s.callAI(ctx, prompt)
+	response, err := s.callAIStream(ctx, prompt, os.Stdout)
 	if err != nil {
 		return nil, fmt.Errorf("improvement suggestions failed: %w", err)
 	}
@@ -178,7 +181,7 @@ func (s *Service) ExplainChanges(ctx context.Context, files []parser.FileDiff) (
 	diffContent := s.prepareDiffContent(files)
 	prompt := s.buildExplanationPrompt(diffContent)
 
-	response, err := s.callAI(ctx, prompt)
+	response, err := s.callAIStream(ctx, prompt, os.Stdout)
 	if err != nil {
 		return "", fmt.Errorf("change explanation failed: %w", err)
 	}
@@ -229,30 +232,31 @@ func (s *Service) prepareDiffContent(files []parser.FileDiff) string {
 
 // buildAnalysisPrompt creates a comprehensive analysis prompt
 func (s *Service) buildAnalysisPrompt(diffContent string) string {
-	return fmt.Sprintf(`Analyze the following git diff and provide a comprehensive analysis in JSON format. Focus on:
+	return fmt.Sprintf(`Analyze the following git diff and provide a comprehensive analysis in JSON format.
 
+IMPORTANT: Return ONLY a single JSON object with these exact fields:
+- summary: plain text string (2-3 sentences) - NO NESTED JSON
+- improvements: array of strings (improvement suggestions)
+- issues: array of strings (potential problems)
+- explanations: array of strings (explanations of changes)
+- commit_message: plain text string (conventional commit format)
+- pr_description: plain text string (multi-line description)
+- code_quality: plain text string (quality assessment)
+- security_notes: array of strings (security observations)
+- performance_notes: array of strings (performance observations)
+
+Focus your analysis on:
 1. Code quality and best practices
 2. Potential bugs or issues
 3. Security concerns
 4. Performance implications
 5. Code improvements and suggestions
-6. Clear explanations of what changed and why
-
-Please respond with a JSON object containing:
-- summary: A brief overview of the changes (string, not JSON)
-- improvements: Array of specific improvement suggestions
-- issues: Array of potential problems or bugs
-- explanations: Array of explanations for complex changes
-- commit_message: A conventional commit message
-- pr_description: A detailed PR description
-- code_quality: Assessment of overall code quality
-- security_notes: Array of security-related observations
-- performance_notes: Array of performance-related observations
+6. Explanations of what changed and why
 
 Git diff:
 %s
 
-Respond only with valid JSON, no additional text.`, diffContent)
+RESPOND ONLY WITH VALID JSON - no markdown, no code blocks, no extra text. Each string field must be plain text, never JSON.`, diffContent)
 }
 
 // buildCommitMessagePrompt creates a prompt for commit message generation
@@ -363,6 +367,71 @@ func (s *Service) callAI(ctx context.Context, prompt string) (string, error) {
 	return resp.Choices[0].Message.Content, nil
 }
 
+// callAIStream makes a streaming request to the AI service and writes to stdout
+// It will only display output if stdout is a TTY (interactive terminal)
+func (s *Service) callAIStream(ctx context.Context, prompt string, writer io.Writer) (string, error) {
+	// Only enable output if we're writing to a terminal
+	shouldOutput := isatty.IsTerminal(os.Stdout.Fd())
+	return s.callAIStreamInternal(ctx, prompt, writer, shouldOutput)
+}
+
+// callAIStreamQuiet makes a streaming request without writing to stdout
+func (s *Service) callAIStreamQuiet(ctx context.Context, prompt string) (string, error) {
+	return s.callAIStreamInternal(ctx, prompt, nil, false)
+}
+
+// callAIStreamInternal makes a streaming request to the AI service
+func (s *Service) callAIStreamInternal(ctx context.Context, prompt string, writer io.Writer, writeOutput bool) (string, error) {
+	req := openai.ChatCompletionRequest{
+		Model: s.config.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: prompt,
+			},
+		},
+		MaxCompletionTokens: s.config.MaxCompletionTokens,
+		Stream:              true,
+	}
+
+	stream, err := s.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	var fullResponse strings.Builder
+	var bufferedWriter *bufio.Writer
+
+	// Wrap the writer in a buffered writer if we need to output
+	if writeOutput && writer != nil {
+		bufferedWriter = bufio.NewWriter(writer)
+	}
+
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", err
+		}
+
+		if len(response.Choices) > 0 && response.Choices[0].Delta.Content != "" {
+			content := response.Choices[0].Delta.Content
+			fullResponse.WriteString(content)
+			// Write to the provided writer if writeOutput is true
+			if writeOutput && bufferedWriter != nil {
+				bufferedWriter.WriteString(content)
+				// Flush after each token to ensure immediate display
+				bufferedWriter.Flush()
+			}
+		}
+	}
+
+	return fullResponse.String(), nil
+}
+
 // parseAnalysisResponse parses the AI response into AnalysisResult
 func (s *Service) parseAnalysisResponse(response string) (*AnalysisResult, error) {
 	// Clean the response - remove any extra text before/after JSON
@@ -420,11 +489,32 @@ func (s *Service) parseAnalysisResponse(response string) (*AnalysisResult, error
 		PerformanceNotes: extractStringArrayFromMap(jsonMap, "performance_notes"),
 	}
 
-	// Handle cases where summary or PRDescription contain JSON
+	// Sanitize all string fields to handle cases where AI returns JSON in string fields
 	result.Summary = sanitizeField(result.Summary, "Summary")
+	result.CodeQuality = sanitizeField(result.CodeQuality, "CodeQuality")
+	result.CommitMessage = sanitizeField(result.CommitMessage, "CommitMessage")
 	result.PRDescription = sanitizeField(result.PRDescription, "PR Description")
 
+	// Also clean up array items that might contain JSON
+	result.Improvements = cleanStringArray(result.Improvements)
+	result.Issues = cleanStringArray(result.Issues)
+	result.Explanations = cleanStringArray(result.Explanations)
+	result.SecurityNotes = cleanStringArray(result.SecurityNotes)
+	result.PerformanceNotes = cleanStringArray(result.PerformanceNotes)
+
 	return result, nil
+}
+
+// cleanStringArray removes empty strings and sanitizes array items
+func cleanStringArray(arr []string) []string {
+	result := make([]string, 0, len(arr))
+	for _, item := range arr {
+		cleaned := sanitizeField(item, "Item")
+		if cleaned != "" && cleaned != "Item generated successfully" {
+			result = append(result, cleaned)
+		}
+	}
+	return result
 }
 
 // extractStringFromMap safely extracts a string value from a map
@@ -459,19 +549,29 @@ func sanitizeField(field, fieldName string) string {
 		return ""
 	}
 
-	// Check if field contains JSON (starts with {)
-	if strings.HasPrefix(strings.TrimSpace(field), "{") {
+	trimmed := strings.TrimSpace(field)
+
+	// Check if field contains JSON (starts with { or [)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		// Try to extract useful information from the JSON
 		var jsonMap map[string]interface{}
-		if err := json.Unmarshal([]byte(field), &jsonMap); err == nil {
-			// Try to extract a meaningful summary from the JSON
-			if summary, ok := jsonMap["summary"].(string); ok && summary != "" {
-				return summary
+		if err := json.Unmarshal([]byte(trimmed), &jsonMap); err == nil {
+			// Try to extract by common field names
+			for _, key := range []string{"summary", "description", "message", "content", "text", "value"} {
+				if val, ok := jsonMap[key]; ok {
+					switch v := val.(type) {
+					case string:
+						if v != "" {
+							return v
+						}
+					}
+				}
 			}
-			// If no summary, try to get the first meaningful field
-			for _, key := range []string{"description", "message", "content", "text"} {
-				if val, ok := jsonMap[key].(string); ok && val != "" {
-					return val
+
+			// If it's a simple object with just one string field, return that
+			for _, v := range jsonMap {
+				if str, ok := v.(string); ok && str != "" {
+					return str
 				}
 			}
 		}
@@ -479,7 +579,7 @@ func sanitizeField(field, fieldName string) string {
 		return fmt.Sprintf("%s generated successfully", fieldName)
 	}
 
-	return field
+	return trimmed
 }
 
 // getEnvOrDefault gets an environment variable or returns a default value

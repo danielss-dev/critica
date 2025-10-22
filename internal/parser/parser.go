@@ -37,13 +37,13 @@ type Hunk struct {
 
 // FileDiff represents all changes in a single file
 type FileDiff struct {
-	OldPath    string
-	NewPath    string
-	IsNew      bool
-	IsDeleted  bool
-	IsRenamed  bool
-	Extension  string
-	Hunks      []Hunk
+	OldPath   string
+	NewPath   string
+	IsNew     bool
+	IsDeleted bool
+	IsRenamed bool
+	Extension string
+	Hunks     []Hunk
 }
 
 var (

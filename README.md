@@ -162,7 +162,7 @@ Critica supports AI-powered analysis using OpenAI's API. To enable AI features:
    ```json
    {
      "ai_enabled": true,
-     "openai_model": "gpt-4o-mini",
+     "openai_model": "gpt-5-nano",
      "openai_base_url": "https://api.openai.com/v1"
    }
    ```
@@ -177,7 +177,7 @@ Critica supports AI-powered analysis using OpenAI's API. To enable AI features:
    ```
 
 **Available AI Models:**
-- `gpt-4o-mini` (default) - Fast and cost-effective
+- `gpt-5-nano` (default) - Fast and cost-effective
 - `gpt-4o` - More capable but slower
 - `gpt-3.5-turbo` - Alternative option
 
